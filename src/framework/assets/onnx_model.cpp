@@ -6,8 +6,10 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace engine::assets::onnx {
 namespace {
@@ -108,6 +110,8 @@ uint64_t message_end(Reader & reader) {
 const char * dtype_name(uint64_t data_type) {
     switch (data_type) {
         case 1: return "F32";
+        case 2: return "U8";
+        case 3: return "I8";
         case 7: return "I64";
         case 10: return "F16";
         case 16: return "BF16";
@@ -118,6 +122,7 @@ const char * dtype_name(uint64_t data_type) {
 size_t dtype_bytes(const std::string & dtype) {
     if (dtype == "F32") return 4;
     if (dtype == "I64") return 8;
+    if (dtype == "I8" || dtype == "U8") return 1;
     return 2;
 }
 
@@ -158,11 +163,29 @@ Initializer read_initializer(Reader & reader, uint64_t end) {
     if (external) reader.fail("initializer " + out.name + " keeps its data in an external file");
     if (dtype == nullptr) reader.fail("initializer " + out.name + " has unsupported data type " + std::to_string(data_type));
     out.dtype = dtype;
+    // a scalar: one value, which the other weight files keep as shape [1]
+    if (out.dims.empty()) out.dims = {1};
     if (!has_data) reader.fail("initializer " + out.name + " stores no packed data");
     if (out.bytes != static_cast<uint64_t>(element_count(out.dims)) * dtype_bytes(out.dtype)) {
         reader.fail("initializer " + out.name + " data size does not match its shape");
     }
     return out;
+}
+
+// AttributeProto: name (1) and, for an integer attribute, i (3).
+void read_attribute(Reader & reader, uint64_t end, Node & node) {
+    std::string name;
+    std::optional<int64_t> value;
+    read_message(reader, end, [&](uint32_t field, uint32_t wire) {
+        if (field == 1 && wire == kLengthDelimited) {
+            name = reader.bytes(reader.varint());
+        } else if (field == 3 && wire == kVarint) {
+            value = static_cast<int64_t>(reader.varint());
+        } else {
+            reader.skip_field(wire);
+        }
+    });
+    if (value.has_value() && !name.empty()) node.int_attributes[name] = *value;
 }
 
 Node read_node(Reader & reader, uint64_t end) {
@@ -178,6 +201,8 @@ Node read_node(Reader & reader, uint64_t end) {
             out.name = reader.bytes(reader.varint());
         } else if (field == 4) {
             out.op_type = reader.bytes(reader.varint());
+        } else if (field == 5) {
+            read_attribute(reader, message_end(reader), out);
         } else {
             reader.skip_field(wire);
         }
@@ -225,6 +250,7 @@ public:
             if (route.transpose && initializer.dims.size() != 2) {
                 throw std::runtime_error("ONNX initializer " + route.initializer + " to transpose is not a matrix");
             }
+            if (!route.scale.empty()) check_quantized(route, initializer);
         }
         for (const auto & [name, tensor] : computed_) {
             if (static_cast<int64_t>(tensor.values.size()) != element_count(tensor.dims)) {
@@ -247,7 +273,7 @@ public:
         }
         const auto & route = require_route(key);
         const auto & initializer = require_initializer(route.initializer);
-        return {key, initializer.dtype, routed_dims(route, initializer)};
+        return {key, route.scale.empty() ? initializer.dtype : "F32", routed_dims(route, initializer)};
     }
 
     std::vector<TensorMetadata> tensors() const override {
@@ -270,7 +296,8 @@ public:
         const auto & route = require_route(key);
         const auto & initializer = require_initializer(route.initializer);
         out.bytes = read_bytes(initializer);
-        if (route.transpose) out.bytes = transposed(out.bytes, initializer);
+        if (!route.scale.empty()) out.bytes = dequantized(out.bytes, route, initializer);
+        if (route.transpose) out.bytes = transposed(out.bytes, initializer, out.metadata.dtype);
         return out;
     }
 
@@ -346,10 +373,57 @@ private:
         return out;
     }
 
-    static std::vector<std::byte> transposed(const std::vector<std::byte> & bytes, const Initializer & initializer) {
+    void check_quantized(const Route & route, const Initializer & initializer) const {
+        if (initializer.dtype != "I8" && initializer.dtype != "U8") {
+            throw std::runtime_error("ONNX initializer " + route.initializer + " to dequantize is not 8-bit");
+        }
+        const auto & scale = require_initializer(route.scale);
+        const int64_t count = element_count(scale.dims);
+        const int64_t rank = static_cast<int64_t>(initializer.dims.size());
+        const int64_t axis = route.axis < 0 ? route.axis + rank : route.axis;
+        if (scale.dtype != "F32" || (count != 1 && (axis < 0 || axis >= rank || count != initializer.dims[axis]))) {
+            throw std::runtime_error("ONNX scale " + route.scale + " does not fit " + route.initializer);
+        }
+        if (!route.zero_point.empty()) {
+            const auto & zero_point = require_initializer(route.zero_point);
+            if (zero_point.dtype != initializer.dtype || element_count(zero_point.dims) != count) {
+                throw std::runtime_error("ONNX zero point " + route.zero_point + " does not fit " + route.initializer);
+            }
+        }
+    }
+
+    std::vector<std::byte> dequantized(
+        const std::vector<std::byte> & bytes, const Route & route, const Initializer & initializer) const {
+        const auto & scale_init = require_initializer(route.scale);
+        const auto scale_bytes = read_bytes(scale_init);
+        std::vector<float> scale(static_cast<size_t>(element_count(scale_init.dims)));
+        std::memcpy(scale.data(), scale_bytes.data(), scale.size() * sizeof(float));
+        std::vector<std::byte> zero(scale.size(), std::byte{0});
+        if (!route.zero_point.empty()) zero = read_bytes(require_initializer(route.zero_point));
+        const bool is_signed = initializer.dtype == "I8";
+        const auto as_int = [is_signed](std::byte b) {
+            return is_signed ? static_cast<int32_t>(static_cast<int8_t>(b)) : static_cast<int32_t>(static_cast<uint8_t>(b));
+        };
+        const int64_t rank = static_cast<int64_t>(initializer.dims.size());
+        const int64_t axis = route.axis < 0 ? route.axis + rank : route.axis;
+        int64_t inner = 1;
+        for (int64_t d = axis + 1; d < rank; ++d) inner *= initializer.dims[static_cast<size_t>(d)];
+        const int64_t channels = scale.size() == 1 ? 1 : initializer.dims[static_cast<size_t>(axis)];
+        std::vector<float> values(bytes.size());
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            const size_t c = channels == 1 ? 0 : static_cast<size_t>((static_cast<int64_t>(i) / inner) % channels);
+            values[i] = static_cast<float>(as_int(bytes[i]) - as_int(zero[c])) * scale[c];
+        }
+        std::vector<std::byte> out(values.size() * sizeof(float));
+        std::memcpy(out.data(), values.data(), out.size());
+        return out;
+    }
+
+    static std::vector<std::byte> transposed(
+        const std::vector<std::byte> & bytes, const Initializer & initializer, const std::string & dtype) {
         const size_t rows = static_cast<size_t>(initializer.dims[0]);
         const size_t cols = static_cast<size_t>(initializer.dims[1]);
-        const size_t width = dtype_bytes(initializer.dtype);
+        const size_t width = dtype_bytes(dtype);
         std::vector<std::byte> out(bytes.size());
         for (size_t r = 0; r < rows; ++r) {
             for (size_t c = 0; c < cols; ++c) {
@@ -362,6 +436,59 @@ private:
     std::shared_ptr<const Model> model_;
     std::unordered_map<std::string, Route> routes_;
     std::unordered_map<std::string, Computed> computed_;
+};
+
+class JoinedSource final : public TensorSource {
+public:
+    explicit JoinedSource(std::vector<std::shared_ptr<const TensorSource>> sources) : sources_(std::move(sources)) {
+        for (size_t i = 0; i < sources_.size(); ++i) {
+            for (const auto & tensor : sources_[i]->tensors()) {
+                if (!owners_.emplace(tensor.name, i).second) {
+                    throw std::runtime_error("ONNX tensor " + tensor.name + " comes from two files");
+                }
+            }
+        }
+    }
+
+    const std::filesystem::path & source_path() const noexcept override { return sources_.front()->source_path(); }
+    bool has_tensor(std::string_view name) const noexcept override { return owners_.count(std::string(name)) != 0; }
+    TensorMetadata require_metadata(std::string_view name) const override { return owner(name).require_metadata(name); }
+
+    std::vector<TensorMetadata> tensors() const override {
+        std::vector<TensorMetadata> out;
+        for (const auto & source : sources_) {
+            auto part = source->tensors();
+            out.insert(out.end(), part.begin(), part.end());
+        }
+        return out;
+    }
+
+    RawTensorData require_tensor_data(std::string_view name) const override { return owner(name).require_tensor_data(name); }
+
+    std::vector<float> require_f32(
+        std::string_view name,
+        const std::optional<std::vector<int64_t>> & expected_shape) const override {
+        return owner(name).require_f32(name, expected_shape);
+    }
+
+    std::optional<std::vector<float>> optional_f32(
+        std::string_view name,
+        const std::optional<std::vector<int64_t>> & expected_shape) const override {
+        if (!has_tensor(name)) return std::nullopt;
+        return require_f32(name, expected_shape);
+    }
+
+    int64_t require_i64_scalar(std::string_view name) const override { return owner(name).require_i64_scalar(name); }
+
+private:
+    const TensorSource & owner(std::string_view name) const {
+        const auto it = owners_.find(std::string(name));
+        if (it == owners_.end()) throw std::runtime_error("missing ONNX tensor: " + std::string(name));
+        return *sources_[it->second];
+    }
+
+    std::vector<std::shared_ptr<const TensorSource>> sources_;
+    std::unordered_map<std::string, size_t> owners_;
 };
 
 }  // namespace
@@ -400,6 +527,11 @@ std::shared_ptr<const TensorSource> open_routed(
     std::unordered_map<std::string, Computed> computed) {
     if (model == nullptr) throw std::runtime_error("routed ONNX tensor source requires a model");
     return std::make_shared<RoutedSource>(std::move(model), std::move(routes), std::move(computed));
+}
+
+std::shared_ptr<const TensorSource> join(std::vector<std::shared_ptr<const TensorSource>> sources) {
+    if (sources.empty()) throw std::runtime_error("joined ONNX tensor source requires a source");
+    return std::make_shared<JoinedSource>(std::move(sources));
 }
 
 }  // namespace engine::assets::onnx

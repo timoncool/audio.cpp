@@ -28,6 +28,7 @@ struct Node {
     std::string op_type;
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
+    std::unordered_map<std::string, int64_t> int_attributes;
 };
 
 struct Model {
@@ -41,9 +42,14 @@ bool is_file(const std::filesystem::path & path);
 
 Model read_model(const std::filesystem::path & path);
 
+// A weight read as it is stored, transposed, or dequantized as DequantizeLinear does it:
+// (q - zero_point) * scale, per slice of `axis` when scale is a vector.
 struct Route {
     std::string initializer;
     bool transpose = false;
+    std::string scale;
+    std::string zero_point;
+    int64_t axis = 1;
 };
 
 struct Computed {
@@ -56,5 +62,8 @@ std::shared_ptr<const TensorSource> open_routed(
     std::shared_ptr<const Model> model,
     std::unordered_map<std::string, Route> routes,
     std::unordered_map<std::string, Computed> computed);
+
+// Several routed sources as one; a name must belong to exactly one of them.
+std::shared_ptr<const TensorSource> join(std::vector<std::shared_ptr<const TensorSource>> sources);
 
 }  // namespace engine::assets::onnx

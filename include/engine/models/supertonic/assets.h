@@ -24,6 +24,10 @@ struct SupertonicAssets {
     std::unordered_map<uint32_t, int64_t> unicode_indexer;
 };
 
+// A folder of the studios' int8 Supertonic 3 export (onnx/, voice_styles/), which load_supertonic_assets reads in
+// place of the package.
+bool is_onnx_directory(const std::filesystem::path & model_path);
+
 std::shared_ptr<const SupertonicAssets> load_supertonic_assets(const std::filesystem::path & model_path);
 
 }  // namespace engine::models::supertonic

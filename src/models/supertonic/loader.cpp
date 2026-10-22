@@ -61,6 +61,9 @@ public:
     }
 
     bool can_load(const runtime::ModelLoadRequest & request) const override {
+        if (is_onnx_directory(request.model_path)) {
+            return !request.family_hint.has_value() || *request.family_hint == family();
+        }
         try {
             (void) engine::model_spec::load_resource_bundle(
                 request.model_path,
@@ -78,6 +81,7 @@ public:
         inspection.metadata = metadata(*assets);
         inspection.capabilities = capabilities(*assets);
         inspection.cli = cli(*assets);
+        if (is_onnx_directory(request.model_path)) return inspection;
         const auto spec_path = engine::model_spec::default_spec_path(family());
         inspection.discovered_configs = runtime::discover_named_assets_from_package_spec(
             request.model_path,
