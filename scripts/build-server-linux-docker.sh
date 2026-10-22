@@ -16,7 +16,7 @@ if [ "${1:-}" = "--inside" ]; then
   backend="$2"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q >/dev/null
-  apt-get install -y -q --no-install-recommends git ninja-build python3-pip ca-certificates build-essential curl xz-utils perl >/dev/null
+  apt-get install -y -q --no-install-recommends git ninja-build python3-pip ca-certificates build-essential curl xz-utils perl patchelf >/dev/null
   pip3 install -q "cmake>=3.28" >/dev/null
   flags=(-DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF)
   case "$backend" in
@@ -57,6 +57,8 @@ if [ "${1:-}" = "--inside" ]; then
   mkdir -p "/out/$backend"
   cp "$exe" "/out/$backend/audiocpp_server"
   cp "$(gcc -print-file-name=libgomp.so.1)" "/out/$backend/"
+  # the CUDA toolkit's folder of the build machine must not reach a user's machine
+  patchelf --set-rpath '$ORIGIN:$ORIGIN/../../models/higgs-engine' "/out/$backend/audiocpp_server"
   readelf -d "/out/$backend/audiocpp_server" | grep -E 'NEEDED|RUNPATH'
   echo "zmm: $(objdump -d --no-show-raw-insn "/out/$backend/audiocpp_server" | grep -c '%zmm' || true)"
   sha256sum "/out/$backend/audiocpp_server"
