@@ -352,11 +352,24 @@ int64_t NemotronASRSessionBase::prompt_id_for_request(const runtime::TaskRequest
     if (language.empty()) {
         return assets_->config.default_prompt_id;
     }
-    const auto it = assets_->config.prompt_dictionary.find(language);
-    if (it == assets_->config.prompt_dictionary.end()) {
-        throw std::runtime_error("Nemotron ASR unsupported language prompt: " + language);
+    const auto & dictionary = assets_->config.prompt_dictionary;
+    if (const auto it = dictionary.find(language); it != dictionary.end()) {
+        return it->second;
     }
-    return it->second;
+    // A bare language code the dictionary lists only with a region (th -> th-TH): the first such locale by name.
+    if (language.find('-') == std::string::npos) {
+        const std::string prefix = language + "-";
+        const std::string * locale = nullptr;
+        for (const auto & [name, id] : dictionary) {
+            if (name.rfind(prefix, 0) == 0 && (locale == nullptr || name < *locale)) {
+                locale = &name;
+            }
+        }
+        if (locale != nullptr) {
+            return dictionary.at(*locale);
+        }
+    }
+    throw std::runtime_error("Nemotron ASR unsupported language prompt: " + language);
 }
 
 int64_t NemotronASRSessionBase::lookahead_for_options(const std::unordered_map<std::string, std::string> & options) const {

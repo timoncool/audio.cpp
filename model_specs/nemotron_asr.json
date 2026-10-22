@@ -61,7 +61,7 @@
       {
         "name": "language",
         "type": "string",
-        "description": "ASR prompt language such as en-US, da-DK, or auto; default is the model's default prompt.",
+        "description": "ASR prompt language such as en-US, da-DK, or auto; a bare code the model lists only with a region (th) takes that locale (th-TH); default is the model's default prompt.",
         "required": false
       },
       {
