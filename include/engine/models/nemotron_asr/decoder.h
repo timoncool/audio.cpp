@@ -26,6 +26,10 @@ struct NemotronDecodedText {
     std::vector<runtime::WordTimestamp> token_timestamps;
 };
 
+// Words of the decoded pieces: a piece opening with a space starts a word, the rest (word endings,
+// punctuation) join the word before it. The model gives no per-token confidence, so words keep 0.
+std::vector<runtime::WordTimestamp> build_word_timestamps(const std::vector<runtime::WordTimestamp> & tokens);
+
 // RNNT prediction-network state carried between decoder steps.
 struct NemotronPredictorState {
     std::vector<float> hidden;         // [layers, hidden]

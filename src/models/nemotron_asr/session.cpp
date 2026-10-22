@@ -402,10 +402,10 @@ runtime::TaskResult NemotronASROfflineSession::run(const runtime::TaskRequest & 
     }
     runtime::TaskResult result;
     result.text_output = runtime::Transcript{decoded.text, language};
-    result.word_timestamps = std::move(decoded.token_timestamps);
+    result.word_timestamps = build_word_timestamps(decoded.token_timestamps);
     if (tagging.has_value()) {
         SpeakerSegmentBuilder builder(tagging->gap_sec, tagging->max_event_sec);
-        for (const auto & word : group_words(result.word_timestamps)) {
+        for (const auto & word : group_words(decoded.token_timestamps)) {
             attribute_word(builder, *speaker_probabilities, word);
         }
         attach_speaker_outputs(result, builder.segments(), false);
@@ -761,7 +761,7 @@ runtime::TaskResult NemotronASRStreamingSession::finalize() {
     auto decoded = decoder_->stream_result(decoder_stream_state_);
     runtime::TaskResult result;
     result.text_output = runtime::Transcript{decoded.text, streaming_language_};
-    result.word_timestamps = std::move(decoded.token_timestamps);
+    result.word_timestamps = build_word_timestamps(decoded.token_timestamps);
     if (stream_segments_ != nullptr) {
         runtime::StreamEvent event;
         event.speaker_turns = attribute_stream_words(true);

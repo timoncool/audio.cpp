@@ -1,5 +1,6 @@
 // Speaker-tagged transcription helpers. The segment cases port NVIDIA-NeMo/Speech
 // tests/collections/speaker_tasks/utils/test_spk_tagged_asr_utils.py (cf724ac).
+#include "engine/models/nemotron_asr/decoder.h"
 #include "engine/models/nemotron_asr/masked_asr.h"
 #include "engine/models/nemotron_asr/speaker_tagging.h"
 
@@ -201,6 +202,26 @@ void test_group_words_and_attribution() {
     require(attribute_speaker(probabilities, {"late", 40, 41}) == 0, "past the frontier uses the last frame");
 }
 
+void test_word_timestamps_join_pieces() {
+    auto token = [](const std::string & text, int64_t frame) {
+        engine::runtime::WordTimestamp t;
+        t.word = text;
+        t.span.start_sample = frame * kSpeakerFrameSamples;
+        t.span.end_sample = (frame + 1) * kSpeakerFrameSamples;
+        return t;
+    };
+    const auto words = build_word_timestamps({token("I", 23), token(" ", 25), token("gue", 25), token("ss", 26),
+                                              token(",", 27), token(" we", 30), token(" ", 31)});
+    require(words.size() == 3, "word count");
+    require(words[0].word == "I" && words[0].span.start_sample == 23 * kSpeakerFrameSamples &&
+                words[0].span.end_sample == 24 * kSpeakerFrameSamples,
+        "a first piece without a space is a word");
+    require(words[1].word == "guess," && words[1].span.start_sample == 25 * kSpeakerFrameSamples &&
+                words[1].span.end_sample == 28 * kSpeakerFrameSamples,
+        "pieces and punctuation join the word, spanning first to last");
+    require(words[2].word == "we", "a trailing space piece is no word");
+}
+
 void test_probability_loading_and_validation() {
     std::vector<float> native(static_cast<size_t>(10 * 2), 0.0F);
     native[static_cast<size_t>(8 * 2 + 1)] = 1.0F;  // row 8 is the lone row of the partial second group
@@ -289,6 +310,7 @@ int main() {
         test_speakers_merge_by_start_time();
         test_events_close_on_gap_and_cap();
         test_group_words_and_attribution();
+        test_word_timestamps_join_pieces();
         test_probability_loading_and_validation();
         test_lookahead_resolution();
         test_strip_language_tags();

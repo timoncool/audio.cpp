@@ -2,6 +2,7 @@
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
+#include "engine/framework/io/text.h"
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/linear_module.h"
 #include "engine/framework/modules/lookup_modules.h"
@@ -109,6 +110,25 @@ std::vector<runtime::WordTimestamp> build_token_timestamps(
 }
 
 }  // namespace
+
+std::vector<runtime::WordTimestamp> build_word_timestamps(const std::vector<runtime::WordTimestamp> & tokens) {
+    std::vector<runtime::WordTimestamp> words;
+    for (const auto & token : tokens) {
+        if (words.empty() || (!token.word.empty() && token.word.front() == ' ')) {
+            words.push_back(token);
+        } else {
+            words.back().word += token.word;
+            words.back().span.end_sample = token.span.end_sample;
+        }
+    }
+    std::vector<runtime::WordTimestamp> out;
+    out.reserve(words.size());
+    for (auto & word : words) {
+        word.word = engine::io::trim_ascii_whitespace(std::move(word.word));
+        if (!word.word.empty()) out.push_back(std::move(word));
+    }
+    return out;
+}
 
 struct NemotronRnntDecoderRuntime::Graph {
     std::unique_ptr<ggml_context, GgmlContextDeleter> ggml;
