@@ -73,4 +73,4 @@ cp "$repo/scripts/build-server-linux-docker.sh" "$out/.build-server-linux-docker
 image=ubuntu:22.04
 [ "$backend" = "cuda" ] && image=nvidia/cuda:13.3.1-devel-ubuntu22.04
 [ "$backend" = "cuda12" ] && image=nvidia/cuda:12.9.1-devel-ubuntu22.04
-docker run --rm -v "$repo:/src:ro" -v "$(cd "$out" && pwd):/out" -v "$cache/$backend:/cache" "$image" bash /out/.build-server-linux-docker.sh --inside "$backend"
+docker run --rm --cpus "$(( $(nproc) * 2 / 3 ))" -v "$repo:/src:ro" -v "$(cd "$out" && pwd):/out" -v "$cache/$backend:/cache" "$image" bash /out/.build-server-linux-docker.sh --inside "$backend"
