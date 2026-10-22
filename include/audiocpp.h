@@ -51,7 +51,7 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 
 #define AUDIOCPP_ABI_VERSION_MAJOR 0
-#define AUDIOCPP_ABI_VERSION_MINOR 2
+#define AUDIOCPP_ABI_VERSION_MINOR 3
 #define AUDIOCPP_ABI_VERSION_PATCH 0
 
 /* Packed as (major << 16) | (minor << 8) | patch. A caller built against a
@@ -76,7 +76,8 @@ typedef enum audiocpp_status {
     AUDIOCPP_ERR_RUNTIME = 4,
     AUDIOCPP_ERR_OUT_OF_MEMORY = 5,
     AUDIOCPP_ERR_OUT_OF_RANGE = 6,
-    AUDIOCPP_ERR_NOT_AVAILABLE = 7
+    AUDIOCPP_ERR_NOT_AVAILABLE = 7,
+    AUDIOCPP_ERR_CANCELLED = 8
 } audiocpp_status;
 
 /* Detail for the most recent failure on this thread. Read it immediately after
@@ -252,6 +253,10 @@ AUDIOCPP_API audiocpp_status audiocpp_session_create(const audiocpp_model * mode
                                                       const audiocpp_options * options,
                                                       audiocpp_session ** out_session);
 AUDIOCPP_API void            audiocpp_session_free(audiocpp_session * session);
+/* Ask a running audiocpp_session_run() on this session to stop. Safe to call
+ * from any thread; the run returns AUDIOCPP_ERR_CANCELLED at the family's next
+ * cancellation point. Families without cancellation points run to the end. */
+AUDIOCPP_API void            audiocpp_session_cancel(audiocpp_session * session);
 
 AUDIOCPP_API const char * audiocpp_session_family(const audiocpp_session * session);
 
@@ -501,7 +506,10 @@ AUDIOCPP_API audiocpp_status audiocpp_stream_push(audiocpp_session * session,
                                                   audiocpp_event ** out_event);
 
 /* Drains events the family queued itself. Sets *out_event to NULL when the
- * queue is empty; that is AUDIOCPP_OK, not an error. */
+ * queue is empty; that is AUDIOCPP_OK, not an error. For text-driven families
+ * (input kind NONE, e.g. streaming TTS) audiocpp_stream_start runs the whole
+ * generation; this call may be made from another thread meanwhile to receive
+ * audio as it is produced. */
 AUDIOCPP_API audiocpp_status audiocpp_stream_next_event(audiocpp_session * session,
                                                         audiocpp_event ** out_event);
 

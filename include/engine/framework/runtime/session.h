@@ -4,11 +4,14 @@
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/io/json.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -173,7 +176,20 @@ struct TaskRequest {
     /// reading either cannot silently see the other half-formed. The `*_list`
     /// option types the spec schema already declares are carried here.
     std::unordered_map<std::string, std::vector<std::string>> option_arrays;
+    /// Set from another thread to stop a running request. Families that honour
+    /// it check it between generation steps and throw TaskCancelled.
+    std::shared_ptr<const std::atomic<bool>> cancel_flag = nullptr;
 };
+
+/// Thrown by a family that stopped a request because its cancel_flag was set.
+class TaskCancelled : public std::runtime_error {
+public:
+    TaskCancelled() : std::runtime_error("generation cancelled") {}
+};
+
+inline void throw_if_cancelled(const TaskRequest & request) {
+    if (request.cancel_flag && request.cancel_flag->load(std::memory_order_relaxed)) throw TaskCancelled();
+}
 
 struct AudioPreparationContract {
     int sample_rate = 0;

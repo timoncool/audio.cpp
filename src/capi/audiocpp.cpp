@@ -27,7 +27,9 @@
 #include <exception>
 #include <filesystem>
 #include <iterator>
+#include <atomic>
 #include <memory>
+#include <deque>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -108,6 +110,9 @@ audiocpp_status guard(Fn && fn, audiocpp_status runtime_status = AUDIOCPP_ERR_RU
     } catch (const std::invalid_argument & e) {
         g_last_error = e.what();
         return AUDIOCPP_ERR_INVALID_ARGUMENT;
+    } catch (const engine::runtime::TaskCancelled & e) {
+        g_last_error = e.what();
+        return AUDIOCPP_ERR_CANCELLED;
     } catch (const std::exception & e) {
         g_last_error = e.what();
         return runtime_status;
@@ -219,6 +224,25 @@ struct audiocpp_session {
     std::unique_ptr<rt::IVoiceTaskSession> session;
     rt::RunMode mode = rt::RunMode::Offline;
     std::string family;
+    std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+    /* Events a text-driven streaming family publishes while start_stream runs.
+     * Guarded so audiocpp_stream_next_event can drain them from another thread
+     * during generation. */
+    std::mutex event_mutex;
+    std::deque<rt::StreamEvent> queued_events;
+
+    void clear_queued_events() {
+        std::lock_guard<std::mutex> lock(event_mutex);
+        queued_events.clear();
+    }
+
+    std::optional<rt::StreamEvent> pop_queued_event() {
+        std::lock_guard<std::mutex> lock(event_mutex);
+        if (queued_events.empty()) return std::nullopt;
+        rt::StreamEvent event = std::move(queued_events.front());
+        queued_events.pop_front();
+        return event;
+    }
 
     rt::IOfflineVoiceTaskSession & offline() const {
         auto * offline = dynamic_cast<rt::IOfflineVoiceTaskSession *>(session.get());
@@ -320,6 +344,7 @@ const char * audiocpp_status_string(audiocpp_status status) {
         case AUDIOCPP_ERR_OUT_OF_MEMORY: return "out of memory";
         case AUDIOCPP_ERR_OUT_OF_RANGE: return "index out of range";
         case AUDIOCPP_ERR_NOT_AVAILABLE: return "not available";
+        case AUDIOCPP_ERR_CANCELLED: return "cancelled";
     }
     return "unknown status";
 }
@@ -574,6 +599,16 @@ audiocpp_status audiocpp_session_create(const audiocpp_model * model,
         handle->mode = spec.mode;
         handle->session = model->model->create_task_session(spec, session_options);
         handle->family = handle->session->family();
+        if (spec.mode == rt::RunMode::Streaming) {
+            auto & streaming = handle->streaming();
+            if (streaming.streaming_policy().input == rt::StreamingInputKind::None) {
+                audiocpp_session * raw = handle.get();
+                streaming.set_stream_event_sink([raw](const rt::StreamEvent & event) {
+                    std::lock_guard<std::mutex> lock(raw->event_mutex);
+                    raw->queued_events.push_back(event);
+                });
+            }
+        }
         *out_session = handle.release();
         return AUDIOCPP_OK;
     });
@@ -581,6 +616,11 @@ audiocpp_status audiocpp_session_create(const audiocpp_model * model,
 
 void audiocpp_session_free(audiocpp_session * session) {
     delete session;
+}
+
+void audiocpp_session_cancel(audiocpp_session * session) {
+    if (session == nullptr) return;
+    session->cancel->store(true, std::memory_order_relaxed);
 }
 
 const char * audiocpp_session_family(const audiocpp_session * session) {
@@ -619,8 +659,11 @@ audiocpp_status audiocpp_session_run(audiocpp_session * session,
          * leave the session sized for the wrong input. */
         session->session->prepare(rt::build_preparation_request(task_request));
 
+        session->cancel->store(false, std::memory_order_relaxed);
+        rt::TaskRequest cancellable = task_request;
+        cancellable.cancel_flag = session->cancel;
         auto handle = std::make_unique<audiocpp_result>();
-        handle->result = session->offline().run(task_request);
+        handle->result = session->offline().run(cancellable);
         *out_result = handle.release();
         return AUDIOCPP_OK;
     });
@@ -1162,7 +1205,11 @@ audiocpp_status audiocpp_stream_start(audiocpp_session * session, const audiocpp
         const rt::TaskRequest empty;
         const auto & task_request = request != nullptr ? request->request : empty;
         session->session->prepare(rt::build_preparation_request(task_request));
-        session->streaming().start_stream(task_request);
+        session->clear_queued_events();
+        session->cancel->store(false, std::memory_order_relaxed);
+        rt::TaskRequest cancellable = task_request;
+        cancellable.cancel_flag = session->cancel;
+        session->streaming().start_stream(cancellable);
         return AUDIOCPP_OK;
     });
 }
@@ -1202,7 +1249,8 @@ audiocpp_status audiocpp_stream_next_event(audiocpp_session * session, audiocpp_
     *out_event = nullptr;
     { const audiocpp_status s = require_streaming(session); if (s != AUDIOCPP_OK) return s; }
     return guard([&] {
-        auto event = session->streaming().next_stream_event();
+        auto event = session->pop_queued_event();
+        if (!event.has_value()) event = session->streaming().next_stream_event();
         /* An empty queue is a normal outcome, not a failure. */
         if (event.has_value()) {
             *out_event = wrap_event(std::move(*event)).release();

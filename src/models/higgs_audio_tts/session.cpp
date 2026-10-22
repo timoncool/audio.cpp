@@ -392,6 +392,7 @@ HiggsGenerationRequest HiggsTTSSession::make_generation_request(
     out.text = request.text_input->text;
     out.reference_text = reference_text;
     out.options = generation_options_from_request(request, assets_->config);
+    out.cancel_flag = request.cancel_flag;
     if (resolved_reference_codes != nullptr) {
         out.reference_codes = resolved_reference_codes->codes;
         out.reference_frames = resolved_reference_codes->frames;

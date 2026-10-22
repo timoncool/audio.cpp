@@ -6,6 +6,7 @@
 #include "engine/models/higgs_audio_tts/tokenizer_text.h"
 #include "engine/framework/runtime/streaming_audio.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -31,6 +32,7 @@ struct HiggsGenerationRequest {
     int64_t reference_frames = 0;
     int64_t reference_codebooks = 0;
     HiggsGenerationOptions options;
+    std::shared_ptr<const std::atomic<bool>> cancel_flag;
 };
 
 struct HiggsGenerationResult {

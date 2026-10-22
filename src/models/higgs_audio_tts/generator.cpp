@@ -4,6 +4,7 @@
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/runtime/kv_cache.h"
 #include "engine/framework/runtime/options.h"
+#include "engine/framework/runtime/session.h"
 #include "engine/framework/sampling/torch_random.h"
 #include "engine/models/higgs_audio_tts/codebooks.h"
 
@@ -485,6 +486,9 @@ HiggsGenerationResult HiggsGenerator::generate(
     HiggsARDecodeTiming decode_timing_total;
     decode_graph_->begin_decode_run();
     while (!state.generation_done && result.delayed_frames < request.options.max_tokens) {
+        if (request.cancel_flag && request.cancel_flag->load(std::memory_order_relaxed)) {
+            throw runtime::TaskCancelled();
+        }
         if (ar_kv_cache_->valid_steps() >= ar_kv_cache_->cache_steps()) {
             decode_timing_total.add(decode_graph_->timing());
             const int64_t grown_cache_steps =
