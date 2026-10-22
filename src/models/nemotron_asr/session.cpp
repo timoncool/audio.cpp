@@ -1,5 +1,6 @@
 #include "engine/models/nemotron_asr/session.h"
 
+#include "engine/framework/audio/chunking.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/runtime/spec_backed_model.h"
@@ -118,6 +119,47 @@ void attach_speaker_outputs(runtime::TaskResult & result, const std::vector<Spea
     }
 }
 
+// The longest waveform one offline pass takes: the encoder's relative positions cover max_position_embeddings
+// subsampled frames.
+int64_t offline_pass_samples(const NemotronConfig & config) {
+    return (config.encoder.max_position_embeddings - 1) * config.encoder.subsampling_factor * config.frontend.hop_length;
+}
+
+// The spans of the waveform passed one at a time. A waveform within one pass stays whole; a longer one is cut at its
+// quietest point near each limit (auto, quiet_energy) or every audio_chunk_duration_sec (fixed), as cohere_asr cuts.
+std::vector<runtime::TimeSpan> offline_spans(
+    const std::vector<float> & waveform,
+    const NemotronConfig & config,
+    const std::unordered_map<std::string, std::string> & options) {
+    const int64_t total = static_cast<int64_t>(waveform.size());
+    const int64_t limit = offline_pass_samples(config);
+    const int64_t rate = config.frontend.sample_rate;
+    int64_t chunk = limit;
+    if (const auto seconds = audio::parse_audio_chunk_seconds_override(options)) {
+        chunk = static_cast<int64_t>(std::llround(static_cast<double>(*seconds) * static_cast<double>(rate)));
+        if (chunk <= 0 || chunk > limit) {
+            throw std::runtime_error(
+                "Nemotron ASR audio_chunk_duration_sec must be positive and at most " +
+                std::to_string(limit / rate) + " s");
+        }
+    }
+    const auto mode = audio::parse_audio_chunk_mode(options);
+    if (mode == audio::AudioChunkMode::None || total <= chunk) {
+        return {{0, total}};
+    }
+    if (mode == audio::AudioChunkMode::Auto || mode == audio::AudioChunkMode::QuietEnergy) {
+        return audio::plan_quiet_energy_audio_chunks(waveform, {chunk, std::min<int64_t>(5 * rate, chunk / 2), rate / 10});
+    }
+    if (mode == audio::AudioChunkMode::Fixed) {
+        std::vector<runtime::TimeSpan> spans;
+        for (const auto & span : audio::plan_audio_chunks(total, {chunk, chunk})) {
+            spans.push_back({span.copy_start_sample, span.copy_start_sample + span.valid_samples});
+        }
+        return spans;
+    }
+    throw std::runtime_error("Nemotron ASR supports auto, quiet_energy, fixed and none audio chunking");
+}
+
 }  // namespace
 
 NemotronASRSessionBase::NemotronASRSessionBase(
@@ -224,7 +266,7 @@ void NemotronASROfflineSession::prepare(const runtime::SessionPreparationRequest
     }
     validate_request_options(request.options);
     const int64_t lookahead = lookahead_for_options(request.options);
-    const int64_t frames = frontend_frames_for_samples(
+    int64_t frames = frontend_frames_for_samples(
         request.audio->max_input_samples,
         request.audio->channels,
         request.audio->sample_rate,
@@ -232,6 +274,10 @@ void NemotronASROfflineSession::prepare(const runtime::SessionPreparationRequest
     // Masked speaker tagging runs chunked streams and never uses the offline graph.
     const auto tagging = speaker_tagging_for_options(request.options);
     const bool masked = tagging.has_value() && tagging->masked;
+    // Without speaker tagging a longer recording runs in passes of at most offline_pass_samples.
+    if (!tagging.has_value()) {
+        frames = std::min(frames, offline_pass_samples(assets_->config) / assets_->config.frontend.hop_length + 1);
+    }
     if (frames > 0 && !mem_saver_ && !masked) {
         encoder_->prepare_capacity(frames, assets_->config.frontend.feature_size, lookahead);
     }
@@ -384,10 +430,43 @@ runtime::TaskResult NemotronASROfflineSession::run(const runtime::TaskRequest & 
         }
     }
 
+    // Speaker tagging attributes the pieces by their frames in the whole recording, so it keeps one pass.
+    const auto spans = tagging.has_value()
+        ? std::vector<runtime::TimeSpan>{{0, static_cast<int64_t>(waveform.size())}}
+        : offline_spans(waveform, assets_->config, request.options);
+    debug::trace_log_scalar("nemotron_asr.offline_passes", spans.size());
     NemotronDecodedText decoded;
-    const auto frontend = frontend_.extract_waveform(waveform, true);
-    const auto encoded = encoder_->encode(frontend, prompt_id, lookahead);
-    decoded = decoder_->decode(encoded, decode_options);
+    std::vector<runtime::WordTimestamp> words;
+    for (const auto & span : spans) {
+        auto pass_options = decode_options;
+        if (decode_options.max_tokens > 0) {
+            pass_options.max_tokens = decode_options.max_tokens - static_cast<int64_t>(decoded.token_ids.size());
+            if (pass_options.max_tokens <= 0) {
+                break;
+            }
+        }
+        const bool whole = span.start_sample == 0 && span.end_sample == static_cast<int64_t>(waveform.size());
+        const auto frontend = whole
+            ? frontend_.extract_waveform(waveform, true)
+            : frontend_.extract_waveform(
+                  std::vector<float>(waveform.begin() + span.start_sample, waveform.begin() + span.end_sample), true);
+        const auto encoded = encoder_->encode(frontend, prompt_id, lookahead);
+        auto pass = decoder_->decode(encoded, pass_options);
+        if (!pass.text.empty()) {
+            if (!decoded.text.empty()) {
+                decoded.text.push_back(' ');
+            }
+            decoded.text += pass.text;
+        }
+        decoded.token_ids.insert(decoded.token_ids.end(), pass.token_ids.begin(), pass.token_ids.end());
+        decoded.durations.insert(decoded.durations.end(), pass.durations.begin(), pass.durations.end());
+        audio::append_chunk_word_timestamps(words, build_word_timestamps(pass.token_timestamps), span);
+        for (auto & token : pass.token_timestamps) {
+            token.span.start_sample += span.start_sample;
+            token.span.end_sample += span.start_sample;
+            decoded.token_timestamps.push_back(std::move(token));
+        }
+    }
     if (mem_saver_) {
         const auto release_start = Clock::now();
         encoder_->release_offline_graph();
@@ -402,7 +481,7 @@ runtime::TaskResult NemotronASROfflineSession::run(const runtime::TaskRequest & 
     }
     runtime::TaskResult result;
     result.text_output = runtime::Transcript{decoded.text, language};
-    result.word_timestamps = build_word_timestamps(decoded.token_timestamps);
+    result.word_timestamps = std::move(words);
     if (tagging.has_value()) {
         SpeakerSegmentBuilder builder(tagging->gap_sec, tagging->max_event_sec);
         for (const auto & word : group_words(decoded.token_timestamps)) {

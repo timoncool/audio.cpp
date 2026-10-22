@@ -80,6 +80,21 @@
         "default": 0
       },
       {
+        "name": "audio_chunk_mode",
+        "type": "enum",
+        "description": "Offline long-form chunking: a recording longer than one encoder pass is cut at its quietest point near each limit (auto, quiet_energy) or at fixed lengths; none keeps one pass. Speaker tagging always keeps one pass.",
+        "values": ["auto", "quiet_energy", "fixed", "none"],
+        "required": false,
+        "default": "auto"
+      },
+      {
+        "name": "audio_chunk_duration_sec",
+        "type": "float",
+        "description": "Maximum offline chunk length in seconds; default and maximum are one encoder pass ((max_position_embeddings - 1) x 80 ms).",
+        "required": false,
+        "min": 0.04
+      },
+      {
         "name": "keep_language_tags",
         "type": "bool",
         "description": "Keep language tag tokens in decoded text; default false.",
