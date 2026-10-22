@@ -101,6 +101,9 @@ struct Assets {
     std::shared_ptr<const assets::TensorSource> model_weights;
 };
 
+// nemotron3_diar_v3.onnx of our studios, which load_assets reads in place of the package.
+bool is_onnx_file(const std::filesystem::path & model_path);
+
 std::shared_ptr<const Assets> load_assets(
     const std::filesystem::path & model_root,
     const std::filesystem::path & spec_path);

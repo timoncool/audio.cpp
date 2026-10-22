@@ -36,6 +36,8 @@ struct SpecBackedVoiceModelConfig {
     std::function<ModelResourcePlan(
         const std::filesystem::path &,
         const std::unordered_map<std::string, std::string> &)> model_resources;
+    // A single file that load_assets reads in place of a package (no package resources to discover).
+    std::function<bool(const std::filesystem::path &)> reads_file;
 };
 
 inline std::shared_ptr<const engine::model_spec::ModelContract> require_model_contract(std::string family) {
@@ -208,6 +210,7 @@ public:
         if (request.family_hint.has_value() && !family_matches(*request.family_hint)) {
             return false;
         }
+        if (config_.reads_file && config_.reads_file(request.model_path)) return true;
         try {
             (void) engine::model_spec::load_resource_bundle_for_family(request.model_path, config_.family);
             return true;
@@ -226,6 +229,7 @@ public:
         inspection.metadata = contract->metadata;
         inspection.capabilities = contract->capabilities;
         inspection.cli = contract->cli;
+        if (config_.reads_file && config_.reads_file(request.model_path)) return inspection;
         inspection.discovered_configs = discover_named_assets_from_package_spec(
             request.model_path,
             package_spec,

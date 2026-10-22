@@ -1,10 +1,18 @@
 #include "engine/models/nemotron_3_diar/assets.h"
 #include "engine/models/nemotron_3_diar/frontend.h"
 
+#include "engine/framework/assets/onnx_model.h"
+#include "engine/framework/audio/dsp.h"
 #include "engine/framework/model_spec/package.h"
 
+#include <algorithm>
+#include <cstring>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace engine::models::nemotron_3_diar {
 namespace {
@@ -64,11 +72,125 @@ FeatureConfig parse_feature_config(const assets::ResourceBundle & resources) {
     return config;
 }
 
+// The parakeet-rs export (nemotron3_diar_v3.onnx) keeps the checkpoint tensors as initializers, except the
+// linear layers, which it lowers to MatMul against the [in, out] weight named only by its node. It has no
+// mel filterbank (NeMo builds it with librosa and stores it in bf16) and keeps the silence embedding in
+// its metadata.
+const std::vector<std::pair<std::regex, std::string>> & onnx_matmul_rules() {
+    static const std::vector<std::pair<std::regex, std::string>> rules = {
+        {std::regex(R"(^/encoder/layers\.(\d+)/attn/(w_qkv|out_proj)/MatMul$)"), "encoder.layers.$1.attn.$2.weight"},
+        {std::regex(R"(^/encoder/layers\.(\d+)/ffn/net/net\.(0|3)/MatMul$)"), "encoder.layers.$1.ffn.net.$2.weight"},
+        {std::regex(R"(^/pre_encode/proj/MatMul$)"), "encoder.pre_encode.proj.weight"},
+        {std::regex(R"(^/(encoder_proj|first_hidden_to_hidden|single_hidden_to_spks)/MatMul$)"),
+         "sortformer_modules.$1.weight"},
+    };
+    return rules;
+}
+
+int64_t onnx_metadata_int(const assets::onnx::Model & model, const char * key) {
+    const auto it = model.metadata.find(key);
+    if (it == model.metadata.end()) {
+        throw std::runtime_error("Nemotron 3 Diarization ONNX has no metadata " + std::string(key));
+    }
+    return std::stoll(it->second);
+}
+
+float to_bf16(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000U;
+    std::memcpy(&value, &bits, sizeof(bits));
+    return value;
+}
+
+std::shared_ptr<const Assets> load_onnx_assets(const std::filesystem::path & path) {
+    auto model = std::make_shared<const assets::onnx::Model>(assets::onnx::read_model(path));
+    auto result = std::make_shared<Assets>();
+    result->resources = assets::ResourceBundle(path.parent_path());
+    auto & config = result->model_config;
+    const auto & features = result->feature_config;
+    if (onnx_metadata_int(*model, "n_spk") != config.num_speakers ||
+        onnx_metadata_int(*model, "emb_dim") != config.encoder.hidden_size ||
+        onnx_metadata_int(*model, "feat_dim") != features.num_mel_bins ||
+        onnx_metadata_int(*model, "subsampling_factor") != config.encoder.subsampling_factor ||
+        onnx_metadata_int(*model, "upsample_factor") != config.head.upsample_factor ||
+        onnx_metadata_int(*model, "high_resolution") != 1) {
+        throw std::runtime_error("Nemotron 3 Diarization ONNX configuration is unsupported: " + path.string());
+    }
+    config.streaming.spkcache_len = onnx_metadata_int(*model, "spkcache_len");
+    config.streaming.fifo_len = onnx_metadata_int(*model, "fifo_len");
+    config.streaming.chunk_len = onnx_metadata_int(*model, "chunk_len");
+    config.streaming.chunk_right_context = onnx_metadata_int(*model, "right_context");
+    config.streaming.spkcache_update_period = onnx_metadata_int(*model, "spkcache_update_period");
+    config.streaming.spkcache_sil_frames_per_spk = onnx_metadata_int(*model, "spkcache_sil_frames_per_spk");
+
+    std::unordered_map<std::string, assets::onnx::Route> routes;
+    for (const auto & [name, initializer] : model->initializers) {
+        if (name.rfind("onnx::", 0) != 0) routes.emplace(name, assets::onnx::Route{name, false});
+    }
+    for (const auto & node : model->nodes) {
+        if (node.op_type != "MatMul" || node.inputs.size() != 2 ||
+            model->initializers.count(node.inputs[1]) == 0) {
+            continue;
+        }
+        for (const auto & [pattern, replacement] : onnx_matmul_rules()) {
+            if (std::regex_match(node.name, pattern)) {
+                routes.emplace(std::regex_replace(node.name, pattern, replacement),
+                               assets::onnx::Route{node.inputs[1], true});
+                break;
+            }
+        }
+    }
+    for (const auto & [name, initializer] : model->initializers) {
+        const bool routed = std::any_of(routes.begin(), routes.end(), [&](const auto & entry) {
+            return entry.second.initializer == name;
+        });
+        if (!routed) {
+            throw std::runtime_error("Nemotron 3 Diarization ONNX has an initializer no rule names: " + name);
+        }
+    }
+
+    const auto sil_text = model->metadata.find("learnable_sil_emb");
+    if (sil_text == model->metadata.end()) {
+        throw std::runtime_error("Nemotron 3 Diarization ONNX has no learnable_sil_emb metadata: " + path.string());
+    }
+    std::vector<float> silence;
+    std::stringstream sil_stream(sil_text->second);
+    for (std::string item; std::getline(sil_stream, item, ',');) silence.push_back(std::stof(item));
+    if (static_cast<int64_t>(silence.size()) != config.encoder.hidden_size) {
+        throw std::runtime_error("Nemotron 3 Diarization ONNX learnable_sil_emb has the wrong size: " + path.string());
+    }
+
+    audio::MelFilterbankConfig mel;
+    mel.sample_rate = features.sample_rate;
+    mel.n_fft = features.n_fft;
+    mel.n_mels = features.num_mel_bins;
+    auto filterbank = audio::MelFilterbank().build(mel);
+    for (float & value : filterbank.values) value = to_bf16(value);
+
+    std::unordered_map<std::string, assets::onnx::Computed> computed;
+    computed.emplace("preprocessor.fb", assets::onnx::Computed{filterbank.shape, std::move(filterbank.values)});
+    computed.emplace("sortformer_modules.learnable_sil_emb",
+                     assets::onnx::Computed{{config.encoder.hidden_size}, std::move(silence)});
+    result->model_weights = assets::onnx::open_routed(model, std::move(routes), std::move(computed));
+    result->mel_filterbank = result->model_weights->require_f32(
+        "preprocessor.fb", {features.num_mel_bins, features.n_fft / 2 + 1});
+    result->silence_embedding = result->model_weights->require_f32(
+        "sortformer_modules.learnable_sil_emb", {config.encoder.hidden_size});
+    result->frontend = std::make_shared<audio::NemoMelFrontend>(make_frontend(*result));
+    return result;
+}
+
 }  // namespace
+
+bool is_onnx_file(const std::filesystem::path & model_path) {
+    return assets::onnx::is_file(model_path);
+}
 
 std::shared_ptr<const Assets> load_assets(
     const std::filesystem::path & model_root,
     const std::filesystem::path & spec_path) {
+    if (is_onnx_file(model_root)) return load_onnx_assets(model_root);
     auto result = std::make_shared<Assets>();
     result->resources = engine::model_spec::load_resource_bundle(model_root, spec_path);
     result->model_config = parse_model_config(result->resources);

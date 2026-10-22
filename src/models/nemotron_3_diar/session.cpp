@@ -600,6 +600,7 @@ std::shared_ptr<runtime::IVoiceModelLoader> make_nemotron_3_diar_loader() {
     config.load_assets = [](const std::filesystem::path & model_path) {
         return load_assets(model_path, model_spec::default_package_spec_path(kFamily));
     };
+    config.reads_file = is_onnx_file;
     config.create_session = [](
                                 const runtime::TaskSpec & task,
                                 const runtime::SessionOptions & options,
