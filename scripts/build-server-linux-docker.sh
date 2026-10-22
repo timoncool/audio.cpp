@@ -5,8 +5,8 @@
 #   cuda12:         CUDA 12.9, machine code for sm 52/60/61/70/75/80/86/89/90/120a and no PTX.
 #   vulkan:         Vulkan and the CPU (LunarG Vulkan SDK; the system's Vulkan loader at run time).
 #   cpu:            the CPU alone.
-# RUNPATH looks beside the program and in ../../models/higgs-engine, where a studio keeps the CUDA runtime, cuBLAS and
-# cuFFT; libgomp is copied beside the program.
+# RUNPATH looks beside the program, in ../../models/higgs-engine, where a studio keeps the CUDA 13 runtime, cuBLAS and
+# cuFFT, and in ../../models/cuda12-runtime, where it keeps those of CUDA 12.9; libgomp is copied beside the program.
 #   scripts/build-server-linux-docker.sh <output folder> [cache folder] [cuda|cuda12|vulkan|cpu]
 set -euo pipefail
 
@@ -50,7 +50,7 @@ if [ "${1:-}" = "--inside" ]; then
     -DAUDIOCPP_BUILD_C_API=ON -DAUDIOCPP_VERSION=dev -DAUDIOCPP_MODEL_SET=full \
     -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF \
     -DGGML_AVX_VNNI=OFF -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
-    '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../../models/higgs-engine' "${flags[@]}" >/dev/null
+    '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../../models/higgs-engine;$ORIGIN/../../models/cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
   cmake --build "/cache/build-$backend" --target audiocpp_server -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
   exe=$(find "/cache/build-$backend" -name audiocpp_server -type f -perm -u+x | head -1)
@@ -58,7 +58,7 @@ if [ "${1:-}" = "--inside" ]; then
   cp "$exe" "/out/$backend/audiocpp_server"
   cp "$(gcc -print-file-name=libgomp.so.1)" "/out/$backend/"
   # the CUDA toolkit's folder of the build machine must not reach a user's machine
-  patchelf --set-rpath '$ORIGIN:$ORIGIN/../../models/higgs-engine' "/out/$backend/audiocpp_server"
+  patchelf --set-rpath '$ORIGIN:$ORIGIN/../../models/higgs-engine:$ORIGIN/../../models/cuda12-runtime' "/out/$backend/audiocpp_server"
   readelf -d "/out/$backend/audiocpp_server" | grep -E 'NEEDED|RUNPATH'
   echo "zmm: $(objdump -d --no-show-raw-insn "/out/$backend/audiocpp_server" | grep -c '%zmm' || true)"
   sha256sum "/out/$backend/audiocpp_server"
