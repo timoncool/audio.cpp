@@ -500,7 +500,9 @@ add_library(engine_core OBJECT
     src/framework/model_spec/package.cpp
     src/framework/model_spec/options.cpp
     src/framework/model_spec/schema.cpp
+    src/framework/assets/gguf_metadata.cpp
     src/framework/assets/tensor_source.cpp
+    src/framework/assets/transcribe_cpp_gguf.cpp
     src/framework/assets/weight_norm_folding.cpp
     src/framework/assets/weight_adapter.cpp
     src/framework/assets/weight_adapter_source.cpp

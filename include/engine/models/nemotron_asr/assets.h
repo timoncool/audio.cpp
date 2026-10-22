@@ -66,6 +66,8 @@ struct NemotronASRAssets {
     bool trim_leading_space = false;
 };
 
+// A Nemotron GGUF written by transcribe.cpp, which load_nemotron_asr_assets reads in place of the package.
+bool is_transcribe_cpp_file(const std::filesystem::path & model_path);
 std::shared_ptr<const NemotronASRAssets> load_nemotron_asr_assets(const std::filesystem::path & model_path);
 
 }  // namespace engine::models::nemotron_asr

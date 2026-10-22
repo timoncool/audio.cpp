@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace engine::models::nemotron_asr {
 namespace {
@@ -224,11 +225,16 @@ NemotronRnntDecoderWeights load_decoder_weights(
     weights.lstm_layers.reserve(static_cast<size_t>(config.decoder_layers));
     for (int64_t layer = 0; layer < config.decoder_layers; ++layer) {
         const std::string prefix = "decoder.lstm.";
+        const std::string bias_hh = prefix + "bias_hh_l" + std::to_string(layer);
+        const int64_t gates = 4 * config.decoder_hidden_size;
+        // transcribe.cpp GGUFs store bias_ih + bias_hh as a single bias_ih.
         weights.lstm_layers.push_back({
-            store.load_tensor(source, prefix + "weight_ih_l" + std::to_string(layer), storage_type, {4 * config.decoder_hidden_size, config.decoder_hidden_size}),
-            store.load_tensor(source, prefix + "weight_hh_l" + std::to_string(layer), storage_type, {4 * config.decoder_hidden_size, config.decoder_hidden_size}),
-            store.load_f32_tensor(source, prefix + "bias_ih_l" + std::to_string(layer), {4 * config.decoder_hidden_size}),
-            store.load_f32_tensor(source, prefix + "bias_hh_l" + std::to_string(layer), {4 * config.decoder_hidden_size}),
+            store.load_tensor(source, prefix + "weight_ih_l" + std::to_string(layer), storage_type, {gates, config.decoder_hidden_size}),
+            store.load_tensor(source, prefix + "weight_hh_l" + std::to_string(layer), storage_type, {gates, config.decoder_hidden_size}),
+            store.load_f32_tensor(source, prefix + "bias_ih_l" + std::to_string(layer), {gates}),
+            source.has_tensor(bias_hh)
+                ? store.load_f32_tensor(source, bias_hh, {gates})
+                : store.make_f32(engine::core::TensorShape::from_dims({gates}), std::vector<float>(static_cast<size_t>(gates), 0.0f)),
         });
     }
     weights.decoder_projector = load_linear(

@@ -1239,22 +1239,13 @@ private:
     std::unordered_map<std::string, Route> routes_;
 };
 
-class PrefixedTensorSourceView final : public TensorSource {
+class RoutedTensorSourceView final : public TensorSource {
 public:
-    PrefixedTensorSourceView(std::shared_ptr<const TensorSource> source, std::string prefix)
-        : source_(std::move(source)), prefix_(std::move(prefix)) {
-        std::replace(prefix_.begin(), prefix_.end(), '\\', '/');
-        while (!prefix_.empty() && prefix_.front() == '/') prefix_.erase(0, 1);
-        while (!prefix_.empty() && prefix_.back() == '/') prefix_.pop_back();
-        if (prefix_.empty()) throw std::runtime_error("packed tensor source prefix is empty");
-        const std::string marker = prefix_ + "/";
-        for (const auto & tensor : source_->tensors()) {
-            if (tensor.name.rfind(marker, 0) == 0) {
-                routes_.emplace(tensor.name.substr(marker.size()), tensor.name);
-            }
-        }
-        if (routes_.empty()) throw std::runtime_error("packed GGUF namespace does not exist: " + prefix_);
-    }
+    RoutedTensorSourceView(
+        std::shared_ptr<const TensorSource> source,
+        std::unordered_map<std::string, std::string> routes,
+        std::string label)
+        : source_(std::move(source)), label_(std::move(label)), routes_(std::move(routes)) {}
 
     const std::filesystem::path & source_path() const noexcept override { return source_->source_path(); }
     bool has_tensor(std::string_view name) const noexcept override {
@@ -1309,11 +1300,11 @@ public:
 private:
     const std::string & require_name(std::string_view name) const {
         const auto it = routes_.find(std::string(name));
-        if (it == routes_.end()) throw std::runtime_error("missing tensor in namespace " + prefix_ + ": " + std::string(name));
+        if (it == routes_.end()) throw std::runtime_error("missing tensor in " + label_ + ": " + std::string(name));
         return it->second;
     }
     std::shared_ptr<const TensorSource> source_;
-    std::string prefix_;
+    std::string label_;
     std::unordered_map<std::string, std::string> routes_;
 };
 
@@ -1728,8 +1719,30 @@ std::shared_ptr<const TensorSource> make_prefixed_tensor_source(
         throw std::runtime_error("prefixed tensor source requires a source");
     }
     if (tensor_prefix.empty()) return source;
-    return std::make_shared<PrefixedTensorSourceView>(
-        std::move(source), std::string(tensor_prefix));
+    std::string prefix(tensor_prefix);
+    std::replace(prefix.begin(), prefix.end(), '\\', '/');
+    while (!prefix.empty() && prefix.front() == '/') prefix.erase(0, 1);
+    while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
+    if (prefix.empty()) throw std::runtime_error("packed tensor source prefix is empty");
+    const std::string marker = prefix + "/";
+    std::unordered_map<std::string, std::string> routes;
+    for (const auto & tensor : source->tensors()) {
+        if (tensor.name.rfind(marker, 0) == 0) {
+            routes.emplace(tensor.name.substr(marker.size()), tensor.name);
+        }
+    }
+    if (routes.empty()) throw std::runtime_error("packed GGUF namespace does not exist: " + prefix);
+    return std::make_shared<RoutedTensorSourceView>(std::move(source), std::move(routes), "namespace " + prefix);
+}
+
+std::shared_ptr<const TensorSource> make_renamed_tensor_source(
+    std::shared_ptr<const TensorSource> source,
+    std::unordered_map<std::string, std::string> routes) {
+    if (source == nullptr) {
+        throw std::runtime_error("renamed tensor source requires a source");
+    }
+    std::string label = source->source_path().filename().string();
+    return std::make_shared<RoutedTensorSourceView>(std::move(source), std::move(routes), std::move(label));
 }
 
 namespace {

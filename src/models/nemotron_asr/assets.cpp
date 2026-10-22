@@ -2,6 +2,8 @@
 
 #include "engine/framework/model_spec/package.h"
 #include "engine/framework/io/json.h"
+#include "engine/framework/assets/gguf_metadata.h"
+#include "engine/framework/assets/transcribe_cpp_gguf.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -121,9 +123,102 @@ NemotronConfig parse_config(const assets::ResourceBundle & resources) {
     return config;
 }
 
+// transcribe.cpp names of the Nemotron subsampling (NeMo's Sequential: conv, act, depthwise, pointwise, act, ...)
+// and of its language prompt head; its conformer, predictor and joint use the shared naming.
+const assets::transcribe_cpp::NameRules & transcribe_cpp_rules() {
+    static const auto rules = assets::transcribe_cpp::compile_rules({
+        {R"(^enc\.pre_encode\.conv\.0\.(weight|bias)$)", "encoder.subsampling.conv_in.$1"},
+        {R"(^enc\.pre_encode\.conv\.2\.(weight|bias)$)", "encoder.subsampling.layers.0.depthwise_conv.$1"},
+        {R"(^enc\.pre_encode\.conv\.3\.(weight|bias)$)", "encoder.subsampling.layers.0.pointwise_conv.$1"},
+        {R"(^enc\.pre_encode\.conv\.5\.(weight|bias)$)", "encoder.subsampling.layers.1.depthwise_conv.$1"},
+        {R"(^enc\.pre_encode\.conv\.6\.(weight|bias)$)", "encoder.subsampling.layers.1.pointwise_conv.$1"},
+        {R"(^enc\.pre_encode\.out\.(weight|bias)$)", "encoder.subsampling.linear.$1"},
+        {R"(^prompt\.mlp\.0\.(weight|bias)$)", "prompt_projector.linear_1.$1"},
+        {R"(^prompt\.mlp\.2\.(weight|bias)$)", "prompt_projector.linear_2.$1"},
+    });
+    return rules;
+}
+
+std::shared_ptr<const NemotronASRAssets> load_transcribe_cpp_assets(const std::filesystem::path & path) {
+    const assets::GgufMetadata metadata(path);
+    auto assets = std::make_shared<NemotronASRAssets>();
+    auto & config = assets->config;
+    config.model_type = "nemotron3_5_asr";
+    config.vocab_size = metadata.require_int("stt.parakeet.predictor.vocab");
+    config.blank_token_id = metadata.require_int("tokenizer.ggml.blank_token_id");
+    config.pad_token_id = metadata.require_int("tokenizer.ggml.unknown_token_id");
+    config.default_prompt_id = metadata.require_int("stt.parakeet.prompt.auto_id");
+    config.decoder_hidden_size = metadata.require_int("stt.parakeet.predictor.hidden");
+    config.decoder_layers = metadata.require_int("stt.parakeet.predictor.n_layers");
+    config.num_prompts = metadata.require_int("stt.parakeet.prompt.num_prompts");
+    config.prompt_intermediate_size = metadata.require_int("stt.parakeet.prompt.hidden");
+
+    auto & enc = config.encoder;
+    enc.hidden_size = metadata.require_int("stt.parakeet.encoder.d_model");
+    enc.intermediate_size = metadata.require_int("stt.parakeet.encoder.d_ff");
+    enc.layers = metadata.require_int("stt.parakeet.encoder.n_layers");
+    enc.heads = metadata.require_int("stt.parakeet.encoder.n_heads");
+    enc.kv_heads = enc.heads;
+    enc.conv_kernel = metadata.require_int("stt.parakeet.encoder.conv_kernel");
+    // the window counts the current frame besides its left context
+    enc.sliding_window = metadata.require_int("stt.parakeet.encoder.att_context_left") + 1;
+    enc.subsampling_factor = metadata.require_int("stt.parakeet.encoder.subsampling_factor");
+    enc.subsampling_channels = metadata.require_int("stt.parakeet.encoder.subsampling_channels");
+    enc.max_position_embeddings = metadata.require_int("stt.parakeet.encoder.pos_emb_max_len");
+    enc.default_lookahead_tokens = metadata.require_int("stt.parakeet.encoder.att_context_right");
+    const auto choices = metadata.require_int_array("stt.parakeet.encoder.att_context_size_choices");
+    if (choices.empty() || choices.size() % 2 != 0) {
+        throw std::runtime_error("transcribe.cpp Nemotron GGUF has malformed att_context_size_choices: " + path.string());
+    }
+    enc.supported_lookahead_tokens.clear();
+    for (size_t i = 1; i < choices.size(); i += 2) enc.supported_lookahead_tokens.push_back(choices[i]);
+
+    config.frontend.sample_rate = metadata.require_int("stt.frontend.sample_rate");
+    config.frontend.feature_size = metadata.require_int("stt.frontend.num_mels");
+    config.frontend.n_fft = metadata.require_int("stt.frontend.n_fft");
+    config.frontend.win_length = metadata.require_int("stt.frontend.win_length");
+    config.frontend.hop_length = metadata.require_int("stt.frontend.hop_length");
+    config.frontend.preemphasis = metadata.require_float("stt.frontend.pre_emphasis");
+
+    const auto locales = metadata.require_string_array("stt.parakeet.prompt.dictionary.locales");
+    const auto indices = metadata.require_int_array("stt.parakeet.prompt.dictionary.indices");
+    if (locales.size() != indices.size()) {
+        throw std::runtime_error("transcribe.cpp Nemotron GGUF prompt dictionary sizes differ: " + path.string());
+    }
+    for (size_t i = 0; i < locales.size(); ++i) config.prompt_dictionary.emplace(locales[i], indices[i]);
+
+    auto tokens = metadata.require_string_array("tokenizer.ggml.tokens");
+    const auto token_types = metadata.require_int_array("tokenizer.ggml.token_type");
+    if (static_cast<int64_t>(tokens.size()) != config.vocab_size || token_types.size() != tokens.size()) {
+        throw std::runtime_error("transcribe.cpp Nemotron GGUF vocabulary does not match predictor.vocab: " + path.string());
+    }
+    // GGUF token types: 1 is a normal piece, the rest (unknown, control) are special
+    assets->special_token_ids.assign(tokens.size(), 0);
+    for (size_t i = 0; i < token_types.size(); ++i) assets->special_token_ids[i] = token_types[i] != 1 ? 1 : 0;
+    assets->metaspace_replacement = "\xE2\x96\x81";
+    assets->trim_leading_space = true;
+    assets->tokenizer = std::make_shared<engine::tokenizers::HuggingFaceTokenizerJson>(
+        std::move(tokens), assets->metaspace_replacement, assets->trim_leading_space);
+
+    assets->source = assets::transcribe_cpp::open_renamed(path, transcribe_cpp_rules());
+    const auto conv_in = assets->source->require_metadata("encoder.subsampling.conv_in.weight");
+    if (conv_in.shape.size() != 4) {
+        throw std::runtime_error("transcribe.cpp Nemotron GGUF has an unexpected subsampling conv: " + path.string());
+    }
+    enc.subsampling_kernel = conv_in.shape[3];
+    enc.subsampling_stride = 2;
+    validate_config(config);
+    return assets;
+}
+
 }  // namespace
 
+bool is_transcribe_cpp_file(const std::filesystem::path & model_path) {
+    return assets::transcribe_cpp::is_file(model_path, "rnnt");
+}
+
 std::shared_ptr<const NemotronASRAssets> load_nemotron_asr_assets(const std::filesystem::path & model_path) {
+    if (is_transcribe_cpp_file(model_path)) return load_transcribe_cpp_assets(model_path);
     auto resources = engine::model_spec::load_resource_bundle(
         model_path,
         engine::model_spec::default_spec_path("nemotron_asr"));

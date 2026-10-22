@@ -82,6 +82,9 @@ public:
 
     bool can_load(const runtime::ModelLoadRequest & request) const override {
         try {
+            if (is_transcribe_cpp_file(request.model_path)) {
+                return !request.family_hint.has_value() || *request.family_hint == family();
+            }
             const auto package_spec = engine::model_spec::default_spec_path(family());
             (void) engine::model_spec::load_resource_bundle(request.model_path, package_spec);
             return !request.family_hint.has_value() || *request.family_hint == family();
@@ -96,6 +99,12 @@ public:
         inspection.model_root = assets->resources.model_root();
         inspection.metadata = metadata(*assets);
         inspection.capabilities = capabilities(*assets);
+        const auto contract = find_contract();
+        inspection.cli = contract ? contract->cli : legacy_cli();
+        if (is_transcribe_cpp_file(request.model_path)) {
+            inspection.model_root = request.model_path.parent_path();
+            return inspection;
+        }
         const auto package_spec = engine::model_spec::default_spec_path(family());
         inspection.discovered_configs = runtime::discover_named_assets_from_package_spec(
             request.model_path,
@@ -105,8 +114,6 @@ public:
             request.model_path,
             package_spec,
             engine::model_spec::ResourceKind::Tensors);
-        const auto contract = find_contract();
-        inspection.cli = contract ? contract->cli : legacy_cli();
         return inspection;
     }
 

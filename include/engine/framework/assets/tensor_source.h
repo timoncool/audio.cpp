@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -183,6 +184,10 @@ std::shared_ptr<const TensorSource> open_tensor_source(
 std::shared_ptr<const TensorSource> make_prefixed_tensor_source(
     std::shared_ptr<const TensorSource> source,
     std::string_view tensor_prefix);
+// A view of `source` under other names: each key of `routes` reads the source tensor it maps to.
+std::shared_ptr<const TensorSource> make_renamed_tensor_source(
+    std::shared_ptr<const TensorSource> source,
+    std::unordered_map<std::string, std::string> routes);
 std::shared_ptr<const TensorSource> make_weight_norm_folded_tensor_source(
     std::shared_ptr<const TensorSource> source,
     std::vector<std::string> patterns);
