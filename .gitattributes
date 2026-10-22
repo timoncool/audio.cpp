@@ -2,6 +2,9 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# Shell scripts run in Linux containers and must keep LF on any checkout.
+*.sh text eol=lf
+
 # Binary, media, model, and archive files.
 *.7z binary
 *.bin binary
