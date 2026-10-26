@@ -1,0 +1,54 @@
+name: studio macOS server
+
+# audiocpp_server for Apple silicon with Metal, built from the tagged commit and attached to the release of the same
+# tag (server-<sha>). Nothing is kept as a workflow artifact.
+on:
+  push:
+    tags:
+      - 'server-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach to, e.g. server-d9085875'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64-metal:
+    runs-on: macos-15
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DGGML_METAL=ON -DENGINE_ENABLE_METAL=ON \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_BUILD_TESTS=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF \
+            -DAUDIOCPP_VERSION=dev -DAUDIOCPP_MODEL_SET=full
+      - name: Build
+        run: cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)" --target audiocpp_server
+      - name: Package
+        run: |
+          mkdir -p dist
+          exe=$(find build -name audiocpp_server -type f -perm -u+x | head -1)
+          cp "$exe" dist/
+          find build/bin -maxdepth 1 -name '*.dylib' -exec cp -P {} dist/ \; 2>/dev/null || true
+          cp LICENSE dist/
+          otool -L dist/audiocpp_server
+          otool -l dist/audiocpp_server | grep -A2 LC_RPATH
+          ./dist/audiocpp_server --help | head -3
+          name=audiocpp-server-macos-arm64-metal.tar.gz
+          tar -czf "$name" -C dist .
+          shasum -a 256 "$name"; stat -f '%z %N' "$name"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" audiocpp-server-macos-arm64-metal.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
