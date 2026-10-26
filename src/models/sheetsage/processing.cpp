@@ -121,7 +121,8 @@ std::string note_to_abc(
     const std::string accidental = pitch_name.substr(1);
     const int accidental_number =
         accidental == "bb" ? -2 : accidental == "b" ? -1 : accidental == "#" ? 1 : accidental == "##" ? 2 : 0;
-    int octave = (midi - 60) / 12;
+    const int from_middle_c = midi - 60;
+    int octave = from_middle_c >= 0 ? from_middle_c / 12 : -((11 - from_middle_c) / 12);
     if (pitch_class == 11 && accidental_number == -1) {
         ++octave;
     } else if (pitch_class == 0 && accidental_number == 1) {
