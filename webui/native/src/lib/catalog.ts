@@ -16,9 +16,11 @@ interface PackageEntry {
 
 interface PackageSpec {
   family: string;
+  capabilities?: Record<string, string[]>;
   packages?: Array<Omit<PackageEntry, 'family'>>;
   options?: {
     request?: Array<{ name: string; required?: boolean }>;
+    session?: Array<{ name: string; description?: string; default?: unknown; min?: number; max?: number }>;
   };
   ui?: {
     builtin_voices?: string[];
@@ -39,7 +41,13 @@ const packages: PackageEntry[] = Object.values(specModules).flatMap((spec) =>
 );
 
 const specsByFamily = new Map(Object.values(specModules).map((spec) => [spec.family, spec]));
+export const modelCapabilities = Object.fromEntries(Object.values(specModules).map(spec =>
+  [spec.family, [...new Set(Object.values(spec.capabilities || {}).flat())]])) as Record<string, string[]>;
 const exposeAllGgufPackageFamilies = new Set([
+  'ming3_tts',
+  'ming3_audio',
+  'latentsync',
+  'xtts_v2',
   'canary_asr',
   'cohere_asr',
   'moss_transcribe_diarize',
@@ -129,7 +137,7 @@ function relatedExposeAllGgufPackages(entry: CatalogEntry): PackageEntry[] {
   const family = packages.filter((candidate) =>
     candidate.family === entry.family && candidate.format === 'gguf');
   if (!family.length) return [];
-  if (entry.family === 'sanotts') return family;
+  if (entry.family === 'sanotts' || entry.family === 'xtts_v2') return family;
   if (!entry.download_id) return family;
   const exact = family.find((candidate) => candidate.id === entry.download_id);
   if (!exact) return relatedPackages(entry);
@@ -402,6 +410,20 @@ export const parameterCatalog = Object.fromEntries(
       }))
     ])
 ) as Record<string, ParamSpec[]>;
+
+for (const [family, spec] of specsByFamily) {
+  const adapter = spec.options?.session?.find((option) => option.name === 'lora');
+  const strength = spec.options?.session?.find((option) => option.name === 'lora_scale');
+  const controls = parameterCatalog[family] || [];
+  if (!adapter || !strength || controls.some((control) => control.session_option === `${family}.lora`)) continue;
+  parameterCatalog[family] = [...controls,
+    { name: 'lora', group: 'lora', scope: 'session', session_option: `${family}.lora`,
+      type: 'text', label: 'Adapter path', default: '', info: adapter.description },
+    { name: 'lora_scale', group: 'lora', scope: 'session', session_option: `${family}.lora_scale`,
+      type: 'number', label: 'Strength', default: strength.default ?? '',
+      minimum: strength.min, maximum: strength.max, step: 0.1, info: strength.description }
+  ];
+}
 
 export const taskLabels: Record<string, string> = {
   tts: 'Text to speech',

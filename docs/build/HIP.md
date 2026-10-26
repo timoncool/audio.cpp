@@ -4,6 +4,50 @@
 
 This document describes the HIP/ROCm backend support added to audio.cpp for running models on AMD GPUs.
 
+## Arch Linux and Arch-based distributions
+
+Use `scripts/install_arch_amd.sh` for a menu-driven AMD HIP build. Its menu is
+implemented with Bash `read` and needs no external TUI program. If build
+dependencies are missing, the script installs the required Arch packages with
+`pacman` through `sudo`. It builds a Release deployment binary and installs
+versioned launchers under `~/.local/bin` and executables under
+`~/.local/opt/audio.cpp/`.
+
+```bash
+bash scripts/install_arch_amd.sh
+```
+
+The menu offers three choices:
+
+1. **Detected GPU** — use the AMD target(s) reported by `amdgpu-arch`, falling
+   back to the GPU agent names from `rocminfo`. This is the recommended choice
+   for a local workstation and can build for any AMD GPU exposed as a target by
+   the installed ROCm stack.
+2. **Portable RDNA set** — build for the documented RDNA3, RDNA3.5, and RDNA4
+   targets: `gfx1100`, `gfx1101`, `gfx1102`, `gfx1103`, `gfx1150`, `gfx1151`,
+   `gfx1200`, and `gfx1201`. Every target must also be supported by the
+   installed ROCm compiler and math libraries.
+3. **RDNA4 only** — create a separate multi-target build for `gfx1200` and
+   `gfx1201`.
+
+For non-interactive use, set `AUDIOCPP_ARCH_MODE` to `auto`, `portable`, or
+`rdna4`. `AUDIOCPP_MODEL_SET=core` builds the smaller core model catalog;
+`AUDIOCPP_MODEL_SET=custom AUDIOCPP_MODELS=ace_step` selects a custom catalog.
+Build and install paths can be changed with `AUDIOCPP_BUILD_ROOT`,
+`AUDIOCPP_INSTALL_ROOT`, and `AUDIOCPP_BIN_ROOT`. HIP virtual memory management
+(VMM) defaults to `auto`: it is enabled for recognized discrete GPU targets
+(`gfx1100`–`gfx1102`, `gfx1200`, and `gfx1201`) and disabled for integrated,
+mixed, or unknown target sets. Override this with `AUDIOCPP_HIP_VMM=on` or
+`AUDIOCPP_HIP_VMM=off`. The build script also accepts `--hip-vmm on|off`.
+
+The auto mode reflects the HIP VMM access fix merged in `main` as commit
+`899d84ad` (PR #1059). On HIP, newly mapped pool ranges now receive access
+permissions across the full mapped contiguous prefix, fixing runtimes that
+rejected access updates limited to a newly mapped subrange. The fix was tested
+with VMM enabled and ACE-Step on an RX 9070 XT. Integrated GPUs remain
+conservative by default because VMM does not address their separate shared
+memory and graph-workspace constraints.
+
 The GGML library vendored at `external/ggml/` already contains a HIP backend that compiles CUDA kernels (`ggml-cuda/*.cu`) as HIP code via a vendor header mapping (`ggml-cuda/vendors/hip.h`). The changes in this PR expose that functionality through audio.cpp's build system, backend abstraction layer, and CLI.
 
 ### How It Works

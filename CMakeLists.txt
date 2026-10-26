@@ -486,6 +486,7 @@ if (ENGINE_ENABLE_NEON)
         src/framework/neon/worker_team.cpp
         src/framework/neon/blocks.cpp
         src/framework/neon/hifigan.cpp
+        src/framework/neon/hift.cpp
         src/framework/neon/vocoder_operators.cpp
         src/framework/neon/kernels.cpp
     )
@@ -810,6 +811,23 @@ audiocpp_add_model(pulsevad
     LOADERS
         engine::models::pulsevad::make_pulsevad_loader
 )
+
+# Earshot VAD: plain C++ port with bundled weights (assets/framework/models/earshot_vad).
+audiocpp_add_model(earshot_vad
+    SOURCES
+        src/community_models/earshot_vad/runtime.cpp
+        src/community_models/earshot_vad/session.cpp
+    INCLUDES
+        engine/community_models/earshot_vad/session.h
+    LOADERS
+        engine::community_models::earshot_vad::make_earshot_vad_loader
+    ALIASES
+        earshot
+)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # Keep multiply-add rounding identical to the Rust reference.
+    set_source_files_properties(src/community_models/earshot_vad/runtime.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
 
 audiocpp_add_model(smart_turn
     SOURCES
@@ -1146,6 +1164,10 @@ audiocpp_add_model(kitten_tts2
     LOADERS engine::community_models::kitten_tts2::make_kitten_tts2_loader
     DEPENDS chatterbox)
 
+if (ENGINE_ENABLE_NEON)
+    target_sources(engine_model_kitten_tts2 PRIVATE src/community_models/kitten_tts2/neon_vocoder.cpp)
+endif()
+
 audiocpp_add_model(kitten_tts
     SOURCES
         src/community_models/kitten_tts/assets.cpp
@@ -1352,10 +1374,14 @@ audiocpp_add_model(pocket_tts
         src/models/pocket_tts/voice_conditioner.cpp
         src/models/pocket_tts/loader.cpp
         src/models/pocket_tts/session.cpp
+        src/models/pocket_tts/gradium_phonon.cpp
     INCLUDES
         engine/models/pocket_tts/loader.h
     LOADERS
         engine::models::pocket_tts::make_pocket_tts_loader
+        engine::models::pocket_tts::make_gradium_phonon_loader
+    ALIASES
+        gradium_phonon
 )
 
 audiocpp_add_model(miocodec
@@ -1828,6 +1854,7 @@ audiocpp_add_model(irodori_tts
         src/models/irodori_tts/codec.cpp
         src/models/irodori_tts/condition_encoder.cpp
         src/models/irodori_tts/duration.cpp
+        src/models/irodori_tts/mf_dit.cpp
         src/models/irodori_tts/rf_dit.cpp
         src/models/irodori_tts/session.cpp
         src/models/irodori_tts/tokenizer_text.cpp
@@ -3256,6 +3283,11 @@ if (ENGINE_ENABLE_OPENMP)
 endif()
 
 if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TESTS)
+    if (earshot_vad IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(earshot_vad_probe tests/earshot_vad/probe.cpp)
+        target_link_libraries(earshot_vad_probe PRIVATE engine_runtime ggml)
+    endif()
+
     if (firered_vad IN_LIST AUDIOCPP_LINKED_MODELS)
         add_executable(firered_vad_probe tests/firered_vad/probe.cpp)
         target_link_libraries(firered_vad_probe PRIVATE engine_runtime ggml)
@@ -3556,6 +3588,9 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(cuda_bias_fusion_test tests/unittests/test_cuda_bias_fusion.cpp)
         add_test(NAME cuda_bias_fusion_test COMMAND cuda_bias_fusion_test)
         set_tests_properties(cuda_bias_fusion_test PROPERTIES SKIP_RETURN_CODE 77)
+        add_engine_unittest(cuda_round_bf16_fusion_test tests/unittests/test_cuda_round_bf16_fusion.cpp)
+        add_test(NAME cuda_round_bf16_fusion_test COMMAND cuda_round_bf16_fusion_test)
+        set_tests_properties(cuda_round_bf16_fusion_test PROPERTIES SKIP_RETURN_CODE 77)
         add_engine_unittest(cuda_rope_rows_test tests/unittests/test_cuda_rope_rows.cpp)
         add_test(NAME cuda_rope_rows_test COMMAND cuda_rope_rows_test)
         set_tests_properties(cuda_rope_rows_test PROPERTIES SKIP_RETURN_CODE 77)
@@ -3636,6 +3671,16 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(granite5asr_ctc_timestamps_test tests/granite5asr/test_ctc_timestamps.cpp)
         target_include_directories(granite5asr_ctc_timestamps_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
         add_test(NAME granite5asr_ctc_timestamps_test COMMAND granite5asr_ctc_timestamps_test)
+    endif()
+
+    if (ENGINE_BUILD_EXTENDED_TESTS AND ENGINE_ENABLE_METAL)
+        add_executable(metal_im2col_test tests/unittests/test_metal_im2col.cpp)
+        target_link_libraries(metal_im2col_test PRIVATE ggml ggml-metal)
+        target_compile_definitions(metal_im2col_test PRIVATE
+            METAL_IM2COL_GOLDEN_PATH="${ENGINE_UNITTEST_ASSET_ROOT}/metal_im2col/original_metal_sha256.txt")
+        add_test(NAME metal_im2col_test COMMAND metal_im2col_test)
+        set_tests_properties(metal_im2col_test PROPERTIES
+            SKIP_RETURN_CODE 77 LABELS "extended;metal")
     endif()
 
     if (ENGINE_BUILD_TESTS)
@@ -3814,11 +3859,18 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(hf_tokenizer_vocab_bounds_test tests/unittests/test_hf_tokenizer_vocab_bounds.cpp)
         add_test(NAME hf_tokenizer_vocab_bounds_test COMMAND hf_tokenizer_vocab_bounds_test)
 
+        add_engine_unittest(hf_tokenizer_sequence_decode_test tests/unittests/test_hf_tokenizer_sequence_decode.cpp)
+        add_test(NAME hf_tokenizer_sequence_decode_test COMMAND hf_tokenizer_sequence_decode_test)
+
         add_engine_unittest(safetensors_offsets_test tests/unittests/test_safetensors_offsets.cpp)
         add_test(NAME safetensors_offsets_test COMMAND safetensors_offsets_test)
 
         add_engine_unittest(safetensors_metadata_depth_test tests/unittests/test_safetensors_metadata_depth.cpp)
         add_test(NAME safetensors_metadata_depth_test COMMAND safetensors_metadata_depth_test)
+
+        add_engine_unittest(vad_loader_test tests/unittests/test_vad_loader.cpp)
+        target_compile_definitions(vad_loader_test PRIVATE ENGINE_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME vad_loader_test COMMAND vad_loader_test)
 
         add_engine_unittest(torch_bin_storage_offset_test tests/unittests/test_torch_bin_storage_offset.cpp)
         add_test(NAME torch_bin_storage_offset_test COMMAND torch_bin_storage_offset_test)
@@ -3828,6 +3880,19 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
 
         add_engine_unittest(audio_chunking_test tests/unittests/test_audio_chunking.cpp)
         add_test(NAME audio_chunking_test COMMAND audio_chunking_test)
+
+        if (earshot_vad IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(earshot_vad_test tests/unittests/test_earshot_vad.cpp)
+            target_compile_definitions(earshot_vad_test PRIVATE
+                ENGINE_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+                ENGINE_TEST_ASSET_ROOT="${ENGINE_UNITTEST_ASSET_ROOT}"
+            )
+            add_test(NAME earshot_vad_test COMMAND earshot_vad_test)
+            # Same checks with the SSE2 minGRU kernel instead of AVX2.
+            add_test(NAME earshot_vad_baseline_test COMMAND earshot_vad_test)
+            set_tests_properties(earshot_vad_baseline_test PROPERTIES ENVIRONMENT "AUDIOCPP_EARSHOT_BASELINE=1")
+        endif()
+
         add_engine_unittest(partial_text_test tests/unittests/test_partial_text.cpp)
         add_test(NAME partial_text_test COMMAND partial_text_test)
         add_engine_unittest(streaming_audio_test tests/unittests/test_streaming_audio.cpp)
@@ -3908,7 +3973,13 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(encoder_module_test tests/unittests/test_encoder_modules.cpp)
         add_test(NAME encoder_module_test COMMAND encoder_module_test)
 
+        add_engine_unittest(snake_beta_test tests/unittests/test_snake_beta.cpp)
+        add_test(NAME snake_beta_test COMMAND snake_beta_test --log)
+
         add_engine_unittest(disk_expert_weight_store_test tests/unittests/test_disk_expert_weight_store.cpp)
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(disk_expert_weight_store_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
         add_test(NAME disk_expert_weight_store_test COMMAND disk_expert_weight_store_test --log)
 
         add_engine_unittest(transpose_module_test tests/unittests/test_transpose_module.cpp)
@@ -3958,6 +4029,10 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
 
         add_engine_unittest(quantize_chunking_test tests/unittests/test_quantize_chunking.cpp)
         add_test(NAME quantize_chunking_test COMMAND quantize_chunking_test)
+
+        add_engine_unittest(tq2_1_test tests/unittests/test_tq2_1.cpp)
+        target_include_directories(tq2_1_test PRIVATE external/ggml/src)
+        add_test(NAME tq2_1_test COMMAND tq2_1_test)
 
         add_engine_unittest(moss_ttsd_speakers_test tests/unittests/test_moss_ttsd_speakers.cpp)
         target_link_libraries(moss_ttsd_speakers_test PRIVATE engine_model_moss_ttsd)
@@ -4180,6 +4255,10 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
     endif()
 
     if (ENGINE_BUILD_MODEL_TESTS)
+        if (higgs_audio_tts IN_LIST AUDIOCPP_LINKED_MODELS)
+            add_engine_unittest(higgs_audio_tts_sampler_test tests/higgs_audio_tts/test_sampler.cpp)
+            add_test(NAME higgs_audio_tts_sampler_test COMMAND higgs_audio_tts_sampler_test --log)
+        endif()
         if("ming3_audio" IN_LIST AUDIOCPP_LINKED_MODELS)
             add_executable(ming3_audio_thinker_parity EXCLUDE_FROM_ALL tests/ming3_audio/thinker_parity.cpp)
             target_link_libraries(ming3_audio_thinker_parity PRIVATE engine_runtime ggml)
@@ -4524,6 +4603,12 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             target_link_libraries(moss_tts_nano_reference_cache_test PRIVATE OpenMP::OpenMP_CXX)
         endif()
         add_test(NAME moss_tts_nano_reference_cache_test COMMAND moss_tts_nano_reference_cache_test)
+        endif()
+
+        if (irodori_tts IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_executable(irodori_schedule_test tests/irodori_tts/test_schedule.cpp)
+        target_link_libraries(irodori_schedule_test PRIVATE engine_runtime ggml)
+        add_test(NAME irodori_schedule_test COMMAND irodori_schedule_test --log)
         endif()
 
         add_executable(moss_tts_v15_prompt_parity

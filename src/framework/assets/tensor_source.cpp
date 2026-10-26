@@ -1,6 +1,7 @@
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/assets/weight_adapter.h"
 #include "engine/framework/assets/torch_bin.h"
+#include "engine/framework/core/backend.h"
 
 #include "engine/framework/io/binary.h"
 #include "engine/framework/io/filesystem.h"
@@ -119,6 +120,7 @@ bool raw_dtype_matches_ggml_type(std::string_view dtype, ggml_type type) {
            (normalized == "q5_k" && type == GGML_TYPE_Q5_K) ||
            (normalized == "q6_k" && type == GGML_TYPE_Q6_K) ||
            (normalized == "q8_0" && type == GGML_TYPE_Q8_0) ||
+           (normalized == "tq2_1" && type == GGML_TYPE_TQ2_1) ||
            (normalized == "nvfp4" && type == GGML_TYPE_NVFP4) ||
            (normalized == "iq2_xxs" && type == GGML_TYPE_IQ2_XXS) ||
            (normalized == "iq2_xs" && type == GGML_TYPE_IQ2_XS) ||
@@ -144,6 +146,7 @@ ggml_type parse_ggml_type_for_tensor_dtype(std::string_view dtype) {
     if (normalized == "q5_0") return GGML_TYPE_Q5_0;
     if (normalized == "q5_1") return GGML_TYPE_Q5_1;
     if (normalized == "q8_0") return GGML_TYPE_Q8_0;
+    if (normalized == "tq2_1") return GGML_TYPE_TQ2_1;
     if (normalized == "q2_k") return GGML_TYPE_Q2_K;
     if (normalized == "q3_k") return GGML_TYPE_Q3_K;
     if (normalized == "q4_k") return GGML_TYPE_Q4_K;
@@ -273,7 +276,23 @@ void set_tensor_bytes(ggml_tensor * tensor, const void * data, size_t bytes, std
     if (bytes != ggml_nbytes(tensor)) {
         throw std::runtime_error("backend tensor byte size mismatch for " + std::string(name));
     }
-    ggml_backend_tensor_set(tensor, data, 0, bytes);
+    ggml_backend_buffer_t buffer = tensor->view_src != nullptr ? tensor->view_src->buffer : tensor->buffer;
+    if (buffer == nullptr || ggml_backend_buffer_is_host(buffer) || !core::is_hip_buffer(buffer)) {
+        ggml_backend_tensor_set(tensor, data, 0, bytes);
+        return;
+    }
+    // HIP device buffers are filled through a bounded host staging buffer instead of straight from
+    // the memory-mapped model file. On ROCm iGPUs without XNACK (Strix Halo, gfx1151) large direct
+    // copies leave the pageable source pages registered with the GPU, the file pages are never
+    // released, and the load crawls once they approach the memory limit.
+    constexpr size_t kUploadChunk = size_t{64} << 20;
+    std::vector<std::byte> staging(std::min(kUploadChunk, bytes));
+    const auto * source = static_cast<const std::byte *>(data);
+    for (size_t offset = 0; offset < bytes; offset += staging.size()) {
+        const size_t count = std::min(staging.size(), bytes - offset);
+        std::memcpy(staging.data(), source + offset, count);
+        ggml_backend_tensor_set(tensor, staging.data(), offset, count);
+    }
 }
 
 std::vector<float> decode_tensor_data_f32(std::string_view name, const TensorData & tensor) {
@@ -1503,6 +1522,9 @@ TensorStorageType parse_tensor_storage_type(std::string_view value) {
     if (normalized == "q8_0") {
         return TensorStorageType::Q8_0;
     }
+    if (normalized == "tq2_1") {
+        return TensorStorageType::TQ2_1;
+    }
     if (normalized == "nvfp4") {
         return TensorStorageType::NVFP4;
     }
@@ -1562,6 +1584,8 @@ ggml_type ggml_type_for_tensor_storage(TensorStorageType storage_type) {
             return GGML_TYPE_Q6_K;
         case TensorStorageType::Q8_0:
             return GGML_TYPE_Q8_0;
+        case TensorStorageType::TQ2_1:
+            return GGML_TYPE_TQ2_1;
         case TensorStorageType::NVFP4:
             return GGML_TYPE_NVFP4;
         case TensorStorageType::IQ2_XXS:
@@ -1625,6 +1649,9 @@ TensorStorageType tensor_storage_type_for_dtype(std::string_view dtype) {
     }
     if (normalized == "q8_0") {
         return TensorStorageType::Q8_0;
+    }
+    if (normalized == "tq2_1") {
+        return TensorStorageType::TQ2_1;
     }
     if (normalized == "nvfp4") {
         return TensorStorageType::NVFP4;

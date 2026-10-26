@@ -15,8 +15,10 @@ For adapter loading and merged GGUF export, see the [LoRA guide](lora.md).
 | F5-TTS | `f5_tts` | `tts`, `clon` | [F5-TTS](models/f5_tts.md) |
 | FireRedAudio | `firered_audio` | `asr`, `tts`, `clon`, `vdes` | [FireRedAudio](models/firered_audio.md) |
 | FireRedTTS3 | `fireredtts3` | `tts`, `clon`, `vdes` | [FireRedTTS3](models/fireredtts3.md) |
+| Fish Audio Drama3 / Drama3-small | `fish_drama3` | `tts`, `clon` | [Drama3](models/fish_drama3.md) |
 | Fish Audio S2 Pro | `fish_audio` | `tts`, `clon` | [Fish Audio S2 Pro](#fish-audio-s2-pro) |
 | GLM-TTS | `glm_tts` | `tts`, `clon` | [GLM-TTS](#glm-tts) |
+| Gradium Phonon | `gradium_phonon` | `tts` | [Gradium Phonon](models/gradium_phonon.md) |
 | Higgs Audio v3 TTS | `higgs_audio_tts` | `tts`, `clon` | [Higgs Audio v3 TTS](models/higgs_audio_tts.md) |
 | IndexTTS2 | `index_tts2` | `tts` | [IndexTTS](models/index_tts2.md) |
 | IndexTTS2.5 | `index_tts2` (variant `2.5`) | `tts` | [IndexTTS](models/index_tts2.md) |
@@ -51,6 +53,7 @@ For adapter loading and merged GGUF export, see the [LoRA guide](lora.md).
 | VoxCPM1 | `voxcpm1` | `tts`, `clon` | [VoxCPM1](#voxcpm1) |
 | VoxCPM2 | `voxcpm2` | `tts`, `clon`, `vdes` | [VoxCPM2](#voxcpm2) |
 | Voxtral 4B TTS | `voxtral_tts` | `tts` | [Voxtral TTS](models/voxtral_tts.md) |
+| XTTS v2 | `xtts_v2` | `tts` | [XTTS v2](community_models/xtts_v2.md) |
 
 This page covers speech TTS-style families. MiniMax-H3 appears here for prompt-driven dialogue audio, but it uses the generation route (`--task gen`) rather than the normal speech route (`--task tts`). Detailed route manuals live under `docs/models/` or `docs/models/` when a model needs more space.
 
@@ -1059,7 +1062,7 @@ audiocpp_cli --task tts --family voxcpm2 --model models/VoxCPM2 --backend cuda -
 | `voxcpm2.prompt_cache_slots` | integer >= 0 | `1` | Cached encoded prompt slots; zero disables reuse. |
 | `voxcpm2.mem_saver` | bool | `true` | Release staged runtime graphs. |
 | `voxcpm2.audiovae_tile_frames` | integer >= 0 | `0` | Opt-in causal AudioVAE tiling; zero preserves full decoding. Set 128 to reduce decoder memory, at the cost of repeated context computation that can slow CPU decoding. |
-| `voxcpm2.perf_mode` | `off`, `optimized` | `off` | `optimized` packs QKV and gate/up projections using their existing weight dtype. May change numerical results and generated audio; `off` preserves standard execution. |
+| `voxcpm2.perf_mode` | `off`, `cuda_perf` | `off` | `cuda_perf` packs QKV and gate/up projections using their existing weight dtype. May change numerical results and generated audio; `off` preserves standard execution. |
 | `voxcpm2.lora` | directory or checkpoint file | not set | Native LoRA weights with adjacent `lora_config.json`; merged at session creation without changing the AudioVAE. |
 | `voxcpm2.lora_scale` | finite float | `1` | Multiplier for the adapter's configured alpha/r scaling. |
 | `voxcpm2.weight_context_mb` | integer >= 1 | `3072` | Context or graph arena size in MiB. |

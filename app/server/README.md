@@ -41,6 +41,42 @@ Open `http://127.0.0.1:8080`, install a model package from the model library,
 then select it in the matching studio tab. Replace `cuda` with a backend your
 binary and selected model support, such as `cpu`, `vulkan`, or `metal`.
 
+Use **Lib → Speakers → New speaker preset** to save a model, voice, and
+generation settings together, then select that speaker in **Apps → Text to
+speech**. **Lib → Voices** manages reference recordings and their transcripts.
+These libraries are stored in this browser, not in the server config. Existing
+projects keep their own speaker settings when a library preset is edited or deleted.
+
+The **Apps** tab, after Studio, is an early release. Workflows and saved project
+formats may change; export audio you want to keep. It contains a project-based
+**Text to speech** app:
+
+- Import TXT/Markdown and preview text splitting before applying it.
+- In **Speakers**, create or reuse named speakers and assign them to passages.
+  Set a project default or apply a speaker to all passages. Search and filter
+  passages; the browser remembers the last selected passage for each project.
+- Edit each chosen take with **Edit audio**: zoom/pan its waveform,
+  place a playhead, insert silence, drag-select and delete existing gaps or
+  audio ranges, remove inserted regions, and undo/redo.
+  Edits stay with that take and persist with the project; original recordings
+  are retained. Boundary previews and exports use the edited audio.
+- Generate chunks individually or in a batch, compare takes, and choose the audio
+  to keep. Optional reference transcription uses a separately selected ASR model.
+- In **Arrange**, inspect joins with actual waveforms and boundary playback.
+  Adjust pauses with + / − or enter an exact duration; choose **Use default**
+  to reset a join. Custom pauses are saved with the project.
+- Combine the selected takes, then use **Export** for optional model enhancement,
+  gain or peak normalization, and WAV PCM16 or WebM Opus download.
+
+Projects, references and generated takes persist in this browser. Regeneration
+preserves chosen takes; splitting/merging archives the original chunks. Changing
+text/settings marks affected audio out of date instead of silently reusing it.
+
+An app applies the saved load/session options when UI management owns the model.
+For a server-configured model, its configuration must already match the saved settings;
+apps do not rewrite the server config. App modules are maintained independently;
+see the [app contribution guide](../../webui/native/src/lib/apps/README.md).
+
 This requires a binary built with `AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON`.
 If the server reports that UI management is unavailable, use the configured API
 path below or [rebuild with that option](#choose-a-server-mode). The plain `--ui`
@@ -648,7 +684,8 @@ Server-side resolution of reference audio and voice names:
 4. Otherwise, `voice` is passed as the model-native cached voice ID.
 
 If neither `voice` nor `voice_ref` is supplied, the configured default preset
-applies. Prefer one selection method per request: combining `voice` and
+applies. An empty string or `null` for `voice` is treated as omitted.
+Prefer one selection method per request: combining `voice` and
 `voice_ref` can pass both a native ID and audio to the model, whose interpretation
 is model-specific. Top-level `reference_text` overrides the preset/library text.
 
@@ -685,7 +722,7 @@ supports every task, mode, or optional output.
 
 | Need | Endpoint | Input / response |
 |---|---|---|
-| Check readiness / configured IDs | <a id="get-health"></a>[`GET /health`](api.md#get-health), <a id="get-v1models"></a>[`GET /v1/models`](api.md#get-v1models) | JSON metadata; a registered model may still be unloaded. |
+| Check readiness / configured IDs | <a id="get-health"></a>[`GET /health`](api.md#get-health), <a id="get-v1models"></a>[`GET /v1/models`](api.md#get-v1models) | JSON metadata, including the build version and git commit; a registered model may still be unloaded. |
 | Generate speech | <a id="post-v1audiospeech"></a>[`POST /v1/audio/speech`](api.md#post-v1audiospeech) | JSON text and voice controls; WAV by default, or streaming audio/SSE when supported. |
 | Transcribe a recording | <a id="post-v1audiotranscriptions"></a>[`POST /v1/audio/transcriptions`](api.md#post-v1audiotranscriptions) | Server-local WAV path or file upload; text/timing, optionally transcript SSE. |
 | Get timestamps or speaker labels | <a id="post-v1audiotranscriptionsdetails"></a>[`POST /v1/audio/transcriptions/details`](api.md#post-v1audiotranscriptionsdetails) | Same inputs; includes detail arrays the model actually produces. |

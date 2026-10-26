@@ -317,6 +317,15 @@ bool buffer_type_supports_matmul_weight(
     return supported;
 }
 
+bool is_hip_buffer(ggml_backend_buffer_t buffer) {
+    if (buffer == nullptr) return false;
+    ggml_backend_buffer_type_t buffer_type = ggml_backend_buffer_get_type(buffer);
+    ggml_backend_dev_t device = buffer_type != nullptr ? ggml_backend_buft_get_device(buffer_type) : nullptr;
+    if (device == nullptr) return false;
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
+    return reg != nullptr && reg_name_matches(BackendType::Hip, ggml_backend_reg_name(reg));
+}
+
 BackendType backend_type(ggml_backend_t backend) {
     if (is_host_backend(backend)) {
         return BackendType::Cpu;
@@ -384,6 +393,17 @@ void set_backend_stream_priority(ggml_backend_t backend, int priority) {
             ggml_backend_dev_backend_reg(device),
             "ggml_backend_cuda_set_stream_priority");
     if (fn != nullptr) fn(backend, priority);
+}
+
+void set_backend_round_bf16_fusion(ggml_backend_t backend, bool enabled) {
+    if (backend == nullptr || !is_cuda_backend_handle(backend)) return;
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    if (device == nullptr) return;
+    auto fn = (void (*)(ggml_backend_t, bool))
+        ggml_backend_reg_get_proc_address(
+            ggml_backend_dev_backend_reg(device),
+            "ggml_backend_cuda_set_round_bf16_fusion");
+    if (fn != nullptr) fn(backend, enabled);
 }
 
 void * backend_cuda_stream(ggml_backend_t backend) {

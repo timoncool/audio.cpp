@@ -242,6 +242,32 @@ audiocpp_cli --family kitten_tts2 \
 If output is cut short by the automatic token budget, set a larger ceiling,
 for example `--request-option max_tokens=1000`.
 
+## Execution plans
+
+The default GGML path is unchanged. `kitten_tts2.exec_plan` is a session option;
+existing GGUFs also accept it without reconversion. Components and parameters
+omitted from the plan retain their defaults.
+
+### NEON vocoder
+
+Build with `-DENGINE_ENABLE_NEON=ON`, then select the HiFT neural decoder:
+
+```sh
+audiocpp_cli --task tts --family kitten_tts2 --model <model.gguf> \
+  --backend cpu --threads 8 --text "Hello from Kitten TTS 2." \
+  --session-option 'kitten_tts2.exec_plan={"vocoder":{"impl":"neon","backend":"cpu"}}' \
+  --out output.wav --metrics --log
+```
+
+The same plan can be used with `--backend metal`: the rest of the model retains
+Metal execution, while the HiFT convolution stack runs on the NEON CPU library.
+Pitch prediction uses the existing framework API. Kitten keeps excitation
+model-local and uses the existing STFT/ISTFT APIs for spectral processing.
+The NEON library has no GGML dependency. Sampling settings, token budgets,
+inference steps and language-model/flow execution remain unchanged.
+Executor selection and weight adaptation stay in Kitten. The NEON path receives
+plain mel/F0 arrays. The GGML HiFT module is unchanged.
+
 ## Updated weight profiles
 
 Use the `kitten_tts2` model family and leave `kitten_tts2.weight_type` unset
@@ -302,6 +328,16 @@ and tensor storage recipe, including the embedding precision shown above.
 For exact Q4 projections with the original BF16 embedding and tied output head,
 use `--type q4_0 --embedding-type orig`. This package loads directly with the
 default native weight type, without runtime Q4 conversion.
+
+For CPU-only ternary storage, `--type tq2_1` packs the 196 projections into
+2.125 bits per weight, preserving independent scales for each 128-weight group.
+The embedding/head stays BF16 and the codec stays F32. Load with native weight
+storage; no session option is needed. This opt-in format requires an audio.cpp
+binary with TQ2_1 support and is not a CUDA/Vulkan/Metal package. Existing package
+defaults are unchanged. The CPU kernel is adapted from
+[Kitten's C++ implementation](https://github.com/KittenML/kitten-tts-2-cpp).
+audio.cpp uses GGUF type ID 44: the other fork's ID 43 is already used by
+audio.cpp's I2_S format, so its ternary GGUFs are not interchangeable.
 
 ```sh
 python tools/community_models/prepare_kitten_tts2_gguf.py \

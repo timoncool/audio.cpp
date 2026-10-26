@@ -24,6 +24,14 @@ refer to entries in your server config, with the task/mode required by the route
 
 Returns server readiness and the number of configured models.
 
+```json
+{"status":"ok","backend":"cpu","models":1,"ui":true,"ui_management":false,"version":"dev","git":"1bbd8517","git_date":"2026-10-25"}
+```
+
+`version`, `git`, and `git_date` are the build values `audiocpp_server --version`
+prints: the `AUDIOCPP_VERSION` CMake value (`dev` by default), the short commit,
+and the commit date.
+
 ## `GET /v1/models`
 
 Returns OpenAI-style model entries for the configured audio.cpp model ids.
@@ -87,6 +95,7 @@ below `2^53` are accepted, but larger JSON numbers may lose precision before
 option parsing.
 
 If no request voice is provided and the configured model has `default_voice_preset`, the server injects that preset automatically. Request-level `voice`, `voice_ref`, and `reference_text` override the configured default.
+An empty string or `null` for `voice` is treated as omitted.
 
 A preset's configured `options` fill missing request keys. Explicit request options override preset options with the same key. Different aliases are not merged; supplying conflicting aliases may produce a model validation error.
 
