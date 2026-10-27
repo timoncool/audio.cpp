@@ -280,6 +280,8 @@ std::vector<runtime::WordTimestamp> ParakeetTDTDecoderRuntime::build_word_timest
     std::string current_word;
     int64_t current_start_frame = 0;
     int64_t current_natural_end_frame = 0;
+    // A lone "▁" token is the space before a piece that carries none, such as the digits of "1945".
+    bool space_pending = false;
 
     auto flush_word = [&](int64_t boundary_frame) {
         if (current_word.empty()) return;
@@ -303,11 +305,16 @@ std::vector<runtime::WordTimestamp> ParakeetTDTDecoderRuntime::build_word_timest
         if (tid < 0 || tid >= static_cast<int32_t>(assets_->tokenizer->id_to_token().size())) continue;
 
         std::string piece = assets_->tokenizer->id_to_token()[static_cast<size_t>(tid)];
-        const bool starts_word = piece.rfind(kSentencePieceSpace, 0) == 0;
+        bool starts_word = piece.rfind(kSentencePieceSpace, 0) == 0;
         if (starts_word) {
             piece.erase(0, 3);
         }
-        if (piece.empty()) continue;
+        if (piece.empty()) {
+            space_pending = space_pending || starts_word;
+            continue;
+        }
+        starts_word = starts_word || space_pending;
+        space_pending = false;
 
         const int64_t token_start = std::clamp<int64_t>(
             frame_indices[i],
