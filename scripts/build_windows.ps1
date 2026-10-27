@@ -7,7 +7,7 @@ param(
     [switch]$RunTests,
     [switch]$Clean,
     [string]$CudaArchitectures = "auto",
-    [ValidateSet("", "native", "avx2", "baseline")]
+    [ValidateSet("", "native", "avx2", "baseline", "all-variants")]
     [string]$CpuArch = "",
     [ValidateSet("ON", "OFF")]
     [string]$NativeCpu = $null,
@@ -159,6 +159,11 @@ function Find-VsInstall {
 
 function Find-MsvcCompiler {
     param([Parameter(Mandatory = $true)][string]$VsInstall)
+    # A CUDA build needs an MSVC toolset its nvcc supports (CUDA 12.9 breaks on 14.5x); pin it with AUDIOCPP_MSVC_TOOLSET.
+    if ($env:AUDIOCPP_MSVC_TOOLSET) {
+        $pinned = Find-FirstFile @("$VsInstall\VC\Tools\MSVC\$($env:AUDIOCPP_MSVC_TOOLSET)*\bin\Hostx64\x64\cl.exe")
+        if ($pinned -ne "") { return $pinned }
+    }
     return Find-FirstFile @("$VsInstall\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe")
 }
 
@@ -207,7 +212,8 @@ function Add-MsvcEnvironment {
 
     $vcvars = Join-Path $VsInstall "VC\Auxiliary\Build\vcvars64.bat"
     if (Test-Path $vcvars) {
-        $cmd = "`"$vcvars`" >nul && set"
+        $verArg = if ($env:AUDIOCPP_MSVC_TOOLSET) { " -vcvars_ver=$($env:AUDIOCPP_MSVC_TOOLSET)" } else { "" }
+        $cmd = "`"$vcvars`"$verArg >nul && set"
         foreach ($line in (& cmd.exe /d /s /c $cmd)) {
             if ($line -match "^([^=]+)=(.*)$") {
                 $name = $Matches[1]
@@ -362,6 +368,15 @@ function Get-CpuArchSettings {
                     "-DGGML_AVX512_VNNI=OFF",
                     "-DGGML_AVX512_BF16=OFF",
                     "-DGGML_AVX_VNNI=OFF"
+                )
+            }
+        }
+        "all-variants" {
+            return @{
+                Label = "all-variants (GGML_CPU_ALL_VARIANTS + GGML_BACKEND_DL)"
+                Native = "OFF"
+                CMakeArgs = @(
+                    "-DENGINE_ENABLE_CPU_ALL_VARIANTS=ON"
                 )
             }
         }

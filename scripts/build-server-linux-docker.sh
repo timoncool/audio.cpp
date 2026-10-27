@@ -1,6 +1,8 @@
 #!/bin/bash
 # audiocpp_server for Linux x86-64, built in an Ubuntu 22.04 container (glibc 2.35: runs there and on anything newer)
-# from the committed HEAD, with the model specs inside (AUDIOCPP_DEPLOYMENT_BUILD), no native CPU flags and no AVX-512.
+# from the committed HEAD, with the model specs inside (AUDIOCPP_DEPLOYMENT_BUILD), no native CPU flags; the CPU backend
+# is built as all per-ISA variants (GGML_CPU_ALL_VARIANTS + GGML_BACKEND_DL), so it runs on any x86-64 — the best
+# variant loads at run time by cpuid, a processor without AVX2 takes the baseline module instead of crashing.
 #   cuda (default): CUDA 13.3, machine code for sm 75/80/86/89/90/120a and no PTX.
 #   cuda12:         CUDA 12.9, machine code for sm 52/60/61/70/75/80/86/89/90/120a and no PTX.
 #   vulkan:         Vulkan and the CPU (LunarG Vulkan SDK; the system's Vulkan loader at run time).
@@ -48,8 +50,7 @@ if [ "${1:-}" = "--inside" ]; then
     -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_LLAMAFILE=ON \
     -DENGINE_BUILD_TESTS=OFF -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF \
     -DAUDIOCPP_BUILD_C_API=ON -DAUDIOCPP_VERSION=dev -DAUDIOCPP_MODEL_SET=full \
-    -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF \
-    -DGGML_AVX_VNNI=OFF -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+    -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
     '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../../models/higgs-engine;$ORIGIN/../../models/cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
   cmake --build "/cache/build-$backend" --target audiocpp_server -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
@@ -57,10 +58,18 @@ if [ "${1:-}" = "--inside" ]; then
   mkdir -p "/out/$backend"
   cp "$exe" "/out/$backend/audiocpp_server"
   cp "$(gcc -print-file-name=libgomp.so.1)" "/out/$backend/"
-  # the CUDA toolkit's folder of the build machine must not reach a user's machine
-  patchelf --set-rpath '$ORIGIN:$ORIGIN/../../models/higgs-engine:$ORIGIN/../../models/cuda12-runtime' "/out/$backend/audiocpp_server"
+  # all-variants: ggml is dynamic now — the CPU backend is per-ISA modules (libggml-cpu-*.so), plus libggml/libggml-base
+  # and the GPU backend, all loaded at run time from beside the program (ggml_backend_load_all). Ship every one.
+  find "/cache/build-$backend" -name 'libggml*.so*' -exec cp -P -t "/out/$backend/" {} +
+  # the CUDA toolkit's folder of the build machine must not reach a user's machine; each shipped binary looks beside itself
+  for so in "/out/$backend/audiocpp_server" "/out/$backend"/libggml*.so*; do
+    if [ -f "$so" ] && [ ! -L "$so" ]; then
+      patchelf --set-rpath '$ORIGIN:$ORIGIN/../../models/higgs-engine:$ORIGIN/../../models/cuda12-runtime' "$so" || true
+    fi
+  done
   readelf -d "/out/$backend/audiocpp_server" | grep -E 'NEEDED|RUNPATH'
-  echo "zmm: $(objdump -d --no-show-raw-insn "/out/$backend/audiocpp_server" | grep -c '%zmm' || true)"
+  echo "cpu variants: $(ls "/out/$backend"/libggml-cpu-*.so 2>/dev/null | wc -l)"
+  echo "zmm in server exe: $(objdump -d --no-show-raw-insn "/out/$backend/audiocpp_server" | grep -c '%zmm' || true)"
   sha256sum "/out/$backend/audiocpp_server"
   echo "[OK] audiocpp_server ($backend)"
   exit 0
