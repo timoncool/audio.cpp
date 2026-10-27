@@ -42,7 +42,12 @@ uint32_t parse_u32_value(const std::string & value, std::string_view key) {
         throw std::runtime_error(std::string(key) + " must be an unsigned integer");
     }
     size_t parsed = 0;
-    const unsigned long out = std::stoul(value, &parsed);
+    unsigned long long out = 0;
+    try {
+        out = std::stoull(value, &parsed);
+    } catch (const std::out_of_range &) {
+        throw std::runtime_error(std::string(key) + " is outside uint32 range");
+    }
     if (parsed != value.size()) {
         throw std::runtime_error(std::string(key) + " must be an unsigned integer");
     }
