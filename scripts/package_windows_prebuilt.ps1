@@ -2,8 +2,8 @@
 param(
     [ValidateSet("all", "cpu", "cuda")]
     [string]$Package = "all",
-    [ValidateSet("fast", "balance", "portable")]
-    [string]$Profile = "balance",
+    [ValidateSet("fast", "balance", "portable", "all-variants")]
+    [string]$Profile = "all-variants",
     [int]$Jobs = 0,
     [string]$OutputDir = "",
     [string]$CudaArchitectures = "default",
@@ -237,6 +237,14 @@ function Get-ProfileSettings {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     switch ($Name) {
+        "all-variants" {
+            return @{
+                Label = "all-variants"
+                CpuArch = "all-variants"
+                Llamafile = "ON"
+                Description = "The only build for public distribution: ggml ships a CPU module per instruction level (baseline x86-64 up to AVX-512) and the runtime loads the best the CPU supports by cpuid. Runs on any x86-64 (no AVX2 required), fast where AVX2/AVX512 exist."
+            }
+        }
         "fast" {
             return @{
                 Label = "fast"
