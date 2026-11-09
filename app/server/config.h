@@ -79,7 +79,9 @@ struct ServerConfig {
     // than on by default.
     bool ui_requested = false;
     bool ui_management = false;
+    std::optional<std::filesystem::path> models_root;
     engine::core::BackendType backend = engine::core::BackendType::Cuda;
+    std::string backend_impl;
     int device = 0;
     int threads = 1;
     bool lazy_load = false;
@@ -112,6 +114,8 @@ struct ServerConfig {
     // entirely (the default), so existing deployments see no behavior change
     // unless they opt in.
     int min_free_memory_mb = 0;
+    // Memory for cached resampling kernels in MiB, 0 disables the cache; unset keeps the library default.
+    std::optional<int> resample_kernel_cache_mb;
     // Fleet-wide bounds for incrementally delivered request bodies. The defaults are
     // in LiveIngestLimits; a model entry may override any subset of them.
     LiveIngestLimits live_ingest;

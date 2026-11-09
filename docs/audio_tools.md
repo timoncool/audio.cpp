@@ -10,6 +10,7 @@
 | GTCRN | `gtcrn`, `gtcrn_dns3`, `gtcrn_vctk`, `gtcrn_streaming` | framework denoise utility API | [GTCRN](#gtcrn) |
 | HTDemucs | `htdemucs` | `sep` | [HTDemucs](#htdemucs) |
 | LFM2.5-Audio | `lfm2_audio` | `s2s` spoken chat (also `asr`, `tts`) | [LFM2.5-Audio](models/lfm2_audio.md) |
+| LFM3-Audio | `lfm3_audio` | `s2s` spoken chat (also `asr`, `tts`) | [LFM3-Audio](models/lfm3_audio.md) |
 | MeanVC2 | `meanvc2` | `vc` | [MeanVC2](#meanvc2) |
 | Mel-Band RoFormer | `mel_band_roformer` | `sep` | [Mel-Band RoFormer](#mel-band-roformer) |
 | Ming 3.0 Audio Tiny | `ming3_audio` | `s2s` spoken responses (also `asr`, `tts`, `clon`) | [Ming Audio](models/ming3_audio.md#spoken-response) |
@@ -17,6 +18,7 @@
 | MossFormer2 | `mossformer2` | `sep` | [MossFormer2](models/mossformer2.md) |
 | MuScriptor | `muscriptor` | audio to MIDI/events | [MuScriptor](#muscriptor) |
 | PersonaPlex | `personaplex` | `s2s` | [PersonaPlex](#personaplex) |
+| Real-time RE-USE | `realtime_reuse` | Offline / streaming `s2s` speech restoration | [Real-time RE-USE](models/realtime_reuse.md) |
 | RE-USE | `reuse` | `s2s` speech restoration | [RE-USE](models/reuse.md) |
 | RVC | `rvc` | `vc` | [RVC](#rvc) |
 | SAM Audio | `sam_audio` | `s2s` prompt-conditioned separation | [SAM Audio](models/sam_audio.md) |
@@ -88,9 +90,9 @@ Converted SafeTensors package:
 audiocpp_cli --task sep --family bs_roformer --model models/BS-RoFormer-ep368 --backend cuda --audio song_44k.wav --out-dir stems
 ```
 
-CUDA uses F32-accumulating Flash Attention while CPU and other backends keep
-the explicit attention path. The packaged overlap count remains the
-quality-oriented default. Lower overlap is an opt-in speed/quality tradeoff:
+CUDA and Vulkan use F32-accumulating Flash Attention while CPU and other
+backends keep the explicit attention path. The packaged overlap count remains
+the quality-oriented default. Lower overlap is an opt-in speed/quality tradeoff:
 
 | Session option | Default | Notes |
 |---|---:|---|
@@ -340,7 +342,7 @@ Mel-Band RoFormer is wired as a vocal/source-separation model. The CLI uses the 
 | Modes | `offline` |
 | Input | 44.1 kHz music mixture WAV through `--audio` |
 | Output | Named separated artifacts under `--out-dir` |
-| Notes | Uses the package overlap count by default; `mel_band_roformer.num_overlap` can lower the overlap for faster inference with a quality tradeoff |
+| Notes | Uses the package overlap count by default; `mel_band_roformer.num_overlap` can lower the overlap for faster inference with a quality tradeoff. CUDA and Vulkan use F32-accumulating Flash Attention; CPU and other backends use the explicit attention path |
 
 ```bash
 audiocpp_cli --task sep --family mel_band_roformer --model models/mel-roformer-mlx --backend cuda --audio song_44k.wav --out-dir stems

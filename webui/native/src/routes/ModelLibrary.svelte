@@ -26,8 +26,8 @@
   export let workflowForEntry: (entry: CatalogEntry) => string;
   export let workflows: { id: string; label: string }[];
 
-  let search = '';
-  let task = '';
+  export let search = '';
+  export let task = '';
   let installation = 'all';
   let choices: Record<string, string> = {};
   const active = (job?: ModelInstallJob) => !!job && ['queued', 'running', 'cancelling'].includes(job.state);
@@ -108,7 +108,7 @@
               {#each entry.install_packages || [] as p}<option value={p.id}>{p.label} · {packageStatus(p, packageSizes, installJobs, packageSizeState)}</option>{/each}
             </select><span>{packageSizes[choice.id]?.size_bytes ? `${formatBytes(packageSizes[choice.id].size_bytes!)} download` : 'Download size unavailable'}</span></div>
             <div class="state" class:installed><strong>{installed ? '✓ Installed' : packageStatus(choice, packageSizes, installJobs, packageSizeState)}</strong>{#if installed && packageSizes[choice.id]?.version_state === 'update_available'}<span>Update available</span>{/if}</div>
-            <div class="actions"><button class="primary" disabled={!installed && (busy || !packageSizes[choice.id])} on:click={() => installed ? openModel(entry, choice) : installPackage(entry, choice)}>{installed ? 'Open in Studio' : 'Download'}</button>
+            <div class="actions"><button class="primary" disabled={!installed && (active(job) || !packageSizes[choice.id])} on:click={() => installed ? openModel(entry, choice) : installPackage(entry, choice)}>{installed ? 'Open in Studio' : 'Download'}</button>
               {#if installed}<details class="manage"><summary aria-label={`Manage ${entry.display_name}`}>Manage</summary><div>{#if packageSizes[choice.id]?.version_state === 'update_available'}<button disabled={busy} on:click={() => installPackage(entry, choice, true)}>Update</button>{/if}<button disabled={busy} on:click={() => removePackage(entry, choice)}>Remove</button></div></details>{/if}
             </div>
             {#if job && !['complete', 'cleaned'].includes(job.state)}<div class="job" class:failed={job.state === 'failed'}><span>{installProgressLabel(job)}</span><progress max="100" value={job.progress_percent >= 0 ? job.progress_percent : undefined}></progress><p>{job.message}</p>{#if active(job)}<button disabled={job.state === 'cancelling'} on:click={() => stopPackageDownload(entry, job)}>Stop download</button>{:else}<button on:click={() => cleanPartialDownload(entry, job)}>Clean partial download</button>{/if}</div>{/if}

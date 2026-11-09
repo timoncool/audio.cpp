@@ -62,7 +62,10 @@ public:
         const engine::runtime::TaskSpec &,
         const engine::runtime::TaskRequest &)>;
 
-    explicit CallbackRecipeModelExecutor(Run run) : run_(std::move(run)) {}
+    using Stream = std::function<engine::runtime::TaskResult(std::string_view,
+        const engine::runtime::TaskSpec &, const engine::runtime::TaskRequest &,
+        const minitts::app::RecipeEventSink &, const minitts::app::AudioChunkStream *)>;
+    CallbackRecipeModelExecutor(Run run, Stream stream) : run_(std::move(run)), stream_(std::move(stream)) {}
 
     engine::runtime::TaskResult run(
         std::string_view role,
@@ -71,8 +74,14 @@ public:
         return run_(role, task, request);
     }
 
+    engine::runtime::TaskResult stream(std::string_view role, const engine::runtime::TaskSpec & task,
+        const engine::runtime::TaskRequest & request, const minitts::app::RecipeEventSink & sink,
+        const minitts::app::AudioChunkStream * source) override {
+        return stream_(role, task, request, sink, source);
+    }
 private:
     Run run_;
+    Stream stream_;
 };
 
 void materialize_embedded_demo_voices(const std::filesystem::path & voice_dir) {
@@ -130,7 +139,8 @@ ServerState::ServerState(
         const auto binary_directory = ui_resource_anchor.empty()
             ? request_base_
             : std::filesystem::absolute(ui_resource_anchor).lexically_normal();
-        default_models_root_ = (binary_directory / "models").lexically_normal();
+        default_models_root_ = std::filesystem::absolute(
+            config_.models_root.value_or(binary_directory / "models")).lexically_normal();
         models_root_ = default_models_root_;
         request_base_ = binary_directory;
         std::filesystem::create_directories(models_root_);
@@ -426,6 +436,36 @@ HttpResponse ServerState::handle_ui_upload(const HttpRequest & request) {
 }
 
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
+// Resolves a "package_id" to the installed package's load target before
+// handing the request to handle_model_load, which only ever sees a path.
+// Path-based loads never touch the installer or its mutex.
+HttpResponse ServerState::handle_package_model_load(const std::string & body_text) {
+    if (!config_.ui_management) {
+        return handle_model_load(body_text);
+    }
+    const auto body = engine::io::json::parse(body_text);
+    std::string package_id;
+    if (auto error = ui_model_load_package_id(body, package_id)) {
+        return *error;
+    }
+    if (package_id.empty()) {
+        return handle_model_load(body_text);
+    }
+    std::optional<engine::package_manager::PackageInfo> info;
+    {
+        std::lock_guard<std::mutex> lock(model_installer_mutex_);
+        if (!model_installer_) {
+            return error_response(403, "UI model management is disabled", "forbidden");
+        }
+        info = model_installer_->package_info(package_id);
+    }
+    std::string resolved_body;
+    if (auto error = resolve_ui_package_model_load(body, package_id, info, resolved_body)) {
+        return *error;
+    }
+    return handle_model_load(resolved_body);
+}
+
 HttpResponse ServerState::handle_model_install(const std::string & body_text) {
     if (!config_.ui_management) {
         return error_response(403, "UI model installation is disabled", "forbidden");
@@ -693,6 +733,7 @@ void ServerState::ensure_model_loaded_locked(LoadedModel & model) {
 
     engine::runtime::SessionOptions session_options;
     session_options.backend.type = config_.backend;
+    session_options.backend.impl = config_.backend_impl;
     session_options.backend.device = model.config.device.value_or(config_.device);
     session_options.backend.threads = config_.threads;
     session_options.options = model.config.session_options;
@@ -823,7 +864,7 @@ ServerState::TimedTaskResult ServerState::run_streaming_model_impl(
     const engine::runtime::TaskRequest & request,
     const minitts::app::AudioChunkStream * audio,
     const std::function<void(const engine::runtime::StreamEvent &)> & event_sink,
-    std::optional<int> busy_timeout_ms) {
+    std::optional<int> busy_timeout_ms, bool include_artifacts) {
     BusyGuard::Lock lock = acquire_model_run(model, busy_timeout_ms);
     ensure_model_loaded_locked(model);
     if (model.streaming == nullptr) {
@@ -835,7 +876,7 @@ ServerState::TimedTaskResult ServerState::run_streaming_model_impl(
     const bool diarization = model.task.task == engine::runtime::VoiceTaskKind::Diarization;
     const auto sink = [&](const engine::runtime::StreamEvent & event) {
         if (!timed_result.ttft_ms.has_value() &&
-            (stream_event_has_output(event) || (diarization && !event.speaker_turns.empty()))) {
+            (stream_event_has_output(event, include_artifacts) || (diarization && !event.speaker_turns.empty()))) {
             timed_result.ttft_ms = elapsed_ms(started);
         }
         if (event_sink) {
@@ -862,8 +903,8 @@ ServerState::TimedTaskResult ServerState::run_streaming_model(
     LoadedModel & model,
     const engine::runtime::TaskRequest & request,
     const std::function<void(const engine::runtime::StreamEvent &)> & event_sink,
-    std::optional<int> busy_timeout_ms) {
-    return run_streaming_model_impl(model, request, nullptr, event_sink, busy_timeout_ms);
+    std::optional<int> busy_timeout_ms, bool include_artifacts) {
+    return run_streaming_model_impl(model, request, nullptr, event_sink, busy_timeout_ms, include_artifacts);
 }
 
 ServerState::TimedTaskResult ServerState::run_streaming_model_from(
@@ -2142,6 +2183,7 @@ HttpResponse ServerState::handle_generic_stream(const std::string & body_text) {
     const auto body = engine::io::json::parse(body_text);
     auto & model = require_model(body);
     const bool sse = task_stream_sse_requested(body);
+    const bool include_artifacts = bool_field(body, "include_artifacts", false);
     const auto * request_json = body.find("request");
     const auto & effective_json = request_json != nullptr ? *request_json : body;
     auto request = apply_default_request_options(
@@ -2162,15 +2204,15 @@ HttpResponse ServerState::handle_generic_stream(const std::string & body_text) {
         // response puts in "events", and the result follows as the object it
         // puts under "result". The model lock is taken inside the stream, as on
         // the other streamed routes, so a busy model is an error event here.
-        return sse_response([this, model_ptr, request = std::move(request), busy_timeout_ms, diarization](
+        return sse_response([this, model_ptr, request = std::move(request), busy_timeout_ms, diarization, include_artifacts](
                                 HttpStreamWriter & writer) {
             const auto timed_result = run_streaming_model(
                 *model_ptr,
                 request,
                 [&](const engine::runtime::StreamEvent & event) {
-                    write_sse(writer, task_stream_event_line(stream_event_json(event, diarization)));
+                    write_sse(writer, task_stream_event_line(stream_event_json(event, diarization, include_artifacts)));
                 },
-                busy_timeout_ms);
+                busy_timeout_ms, include_artifacts);
             const bool silent_diarization = diarization && !timed_result.ttft_ms.has_value();
             write_sse(writer, task_stream_done_line(
                                   silent_diarization
@@ -2186,7 +2228,7 @@ HttpResponse ServerState::handle_generic_stream(const std::string & body_text) {
         [&](const engine::runtime::StreamEvent & event) {
             events.push_back(event);
         },
-        parse_busy_timeout_override(body));
+        parse_busy_timeout_override(body), include_artifacts);
     std::ostringstream out;
     std::shared_lock<std::shared_mutex> metadata_lock(model.metadata_mutex);
     const bool diarization = model.task.task == engine::runtime::VoiceTaskKind::Diarization;
@@ -2195,7 +2237,7 @@ HttpResponse ServerState::handle_generic_stream(const std::string & body_text) {
         if (i != 0) {
             out << ",";
         }
-        out << stream_event_json(events[i], diarization);
+        out << stream_event_json(events[i], diarization, include_artifacts);
     }
     const bool silent_diarization = diarization && !timed_result.ttft_ms.has_value();
     out << "],\"result\":" << (silent_diarization
@@ -2237,13 +2279,14 @@ ServerState::TimedTaskResult ServerState::run_recipe(
     auto request = minitts::cli::build_request_from_json(*request_json, request_base_);
     const auto busy_timeout_ms = parse_busy_timeout_override(body);
 
-    CallbackRecipeModelExecutor executor([
+    const auto execute = [
         this,
         &model_ids,
         busy_timeout_ms](
             std::string_view role,
             const engine::runtime::TaskSpec & task,
-            const engine::runtime::TaskRequest & stage_request) {
+            const engine::runtime::TaskRequest & stage_request,
+            const minitts::app::RecipeEventSink & sink, const minitts::app::AudioChunkStream * source) {
         const auto selected = model_ids.find(std::string(role));
         if (selected == model_ids.end()) {
             throw std::runtime_error("recipe requested an undeclared model role: " + std::string(role));
@@ -2265,8 +2308,16 @@ ServerState::TimedTaskResult ServerState::run_recipe(
             }
             effective_request = apply_default_request_options(model.config.default_request_options, stage_request);
         }
+        if (task.mode == engine::runtime::RunMode::Streaming) {
+            return run_streaming_model_impl(model, effective_request, source, sink, busy_timeout_ms, true).result;
+        }
         return run_model(model, effective_request, busy_timeout_ms).result;
-    });
+    };
+    CallbackRecipeModelExecutor executor(
+        [&](std::string_view role, const engine::runtime::TaskSpec & task,
+            const engine::runtime::TaskRequest & stage_request) {
+            return execute(role, task, stage_request, {}, nullptr);
+        }, execute);
 
     const auto started = Clock::now();
     auto result = recipe.run(executor, request, event_sink);
@@ -2285,7 +2336,8 @@ HttpResponse ServerState::handle_recipe_run(const std::string & body_text) {
         const auto timed = run_recipe(
             stream_body,
             [&](const engine::runtime::StreamEvent & event) {
-                write_sse(writer, task_stream_event_line(stream_event_json(event, false)));
+                write_sse(writer, task_stream_event_line(stream_event_json(event, false,
+                    bool_field(stream_body, "include_artifacts", false))));
             });
         write_sse(
             writer,

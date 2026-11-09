@@ -1,5 +1,7 @@
 #include "engine/community_models/echo_tts/session.h"
 
+#include "engine/framework/debug/profiler.h"
+
 #include "engine/community_models/echo_tts/dit.h"
 #include "engine/community_models/echo_tts/latent_post.h"
 #include "engine/community_models/echo_tts/tokenizer.h"
@@ -238,7 +240,7 @@ void require_supported_request_options(
     // 'guidance_interval' option; keep them usable while still validating
     // the value below.
     auto validation_options = options;
-    for (auto key : {"guidance_scale", "text_chunk_size"}) {
+    for (auto key : {"guidance_scale", "text_chunk_size", "sway_coeff", "t_schedule_mode"}) {
         if (contract.request_option_keys.find(key) ==
             contract.request_option_keys.end()) {
           validation_options.erase(key);
@@ -306,9 +308,24 @@ runtime::RunMode EchoTtsSession::run_mode() const { return task_.mode; }
 EchoSamplerOptions EchoTtsSession::parse_sampler_options(
     const std::unordered_map<std::string, std::string> & options) const {
     EchoSamplerOptions sampler;
-    sampler.num_steps =
-        runtime::parse_int_option(options, {"num_inference_steps"}).value_or(sampler.num_steps);
     sampler.cfg_mode = cfg_mode_; // Session-only option (for now), copy from the session
+    if (const auto t_schedule_mode_raw = runtime::find_option(options, {"t_schedule_mode"})) {
+        const auto t_schedule_mode = lower_ascii(trim_ascii(*t_schedule_mode_raw));
+        if (t_schedule_mode == "linear") {
+            sampler.t_schedule_mode = EchoScheduleMode::Linear;
+        } else if (t_schedule_mode == "sway") {
+            sampler.t_schedule_mode = EchoScheduleMode::Sway;
+        } else {
+            throw runtime::InvalidRequestError("Echo-TTS t_schedule_mode must be one of 'linear' or 'sway'.");
+        }
+    }
+    sampler.num_steps =
+        runtime::parse_int_option(options, {"num_inference_steps"}).value_or(
+            sampler.t_schedule_mode == EchoScheduleMode::Linear ? sampler.num_steps : sampler.num_steps_sway);
+    if (sampler.t_schedule_mode == EchoScheduleMode::Sway) {
+        sampler.sway_coeff = runtime::parse_float_option(options, {"sway_coeff"})
+            .value_or(sampler.sway_coeff);
+    }
     if (cfg_mode_ == EchoCfgMode::Independent) {
         sampler.cfg_scale_text = runtime::parse_float_option(options, {"text_guidance_scale"})
                                     .value_or(sampler.cfg_scale_text);
@@ -662,6 +679,7 @@ runtime::AudioBuffer EchoTtsSession::synthesize_chunk(
 }
 
 runtime::TaskResult EchoTtsSession::run(const runtime::TaskRequest & request) {
+    const auto wall_start = std::chrono::steady_clock::now();
     require_prepared("Echo-TTS run");
     require_supported_request_options(request.options, *contract_);
 
@@ -708,6 +726,7 @@ runtime::TaskResult EchoTtsSession::run(const runtime::TaskRequest & request) {
     // than clipped at the WAV writer.
     engine::audio::normalize_peak_to_unit_range_and_clamp_in_place(output.samples);
     result.audio_output = std::move(output);
+    engine::debug::timing_log_scalar("session.wall_ms", engine::debug::elapsed_ms(wall_start));
     return result;
 }
 

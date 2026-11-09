@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/framework/assets/tensor_source.h"
+#include "engine/framework/core/backend.h"
 #include "engine/models/qwen3_tts/assets.h"
 #include "engine/models/qwen3_tts/types.h"
 
@@ -70,9 +71,7 @@ public:
 
     std::shared_ptr<const Qwen3TalkerWeightsRuntime> create_weights_runtime(
         std::shared_ptr<const Qwen3TTSAssets> assets,
-        core::BackendType backend_type,
-        int device,
-        int threads,
+        const core::BackendConfig & backend_config,
         size_t graph_arena_bytes,
         size_t talker_constant_context_bytes,
         size_t code_predictor_constant_context_bytes,
@@ -81,7 +80,8 @@ public:
         int64_t kv_cache_alignment = 1,
         bool packed_projections = false,
         ggml_type kv_cache_type = GGML_TYPE_F32,
-        bool optimized_kv_cache_write = false) const;
+        bool optimized_kv_cache_write = false,
+        bool bf16_activations = false) const;
 
     std::shared_ptr<Qwen3TalkerStepRuntime> create_step_runtime(
         std::shared_ptr<const Qwen3TalkerWeightsRuntime> weights,

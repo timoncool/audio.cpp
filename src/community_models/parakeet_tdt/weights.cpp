@@ -1,4 +1,5 @@
 #include "engine/community_models/parakeet_tdt/weights.h"
+#include "engine/community_models/parakeet_tdt/implementation.h"
 
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/modules/weight_binding.h"
@@ -189,24 +190,12 @@ ParakeetFastConformerWeights load_encoder_weights(
 
 ParakeetTDTDecoderWeights load_decoder_weights(
     engine::core::BackendWeightStore & store, const engine::assets::TensorSource & source,
-    const ParakeetConfig & config, engine::assets::TensorStorageType st) {
+    const ParakeetTDTAssets & assets, engine::assets::TensorStorageType st) {
+    const auto & config = assets.config;
     ParakeetTDTDecoderWeights w;
     const int64_t H = config.decoder_hidden_size;
     w.embedding = store.load_tensor(source, "decoder.embedding.weight", st, {config.vocab_size, H});
-    w.lstm_layers.reserve(static_cast<size_t>(config.decoder_layers));
-    for (int64_t l = 0; l < config.decoder_layers; ++l) {
-        const std::string p = "decoder.lstm";
-        const std::string bias_hh = p + ".bias_hh_l" + std::to_string(l);
-        // transcribe.cpp GGUFs store bias_ih + bias_hh as a single bias_ih.
-        w.lstm_layers.push_back({
-            store.load_tensor(source, p + ".weight_ih_l" + std::to_string(l), st, {4*H, H}),
-            store.load_tensor(source, p + ".weight_hh_l" + std::to_string(l), st, {4*H, H}),
-            store.load_f32_tensor(source, p + ".bias_ih_l" + std::to_string(l), {4*H}),
-            source.has_tensor(bias_hh)
-                ? store.load_f32_tensor(source, bias_hh, {4*H})
-                : store.make_f32(engine::core::TensorShape::from_dims({4*H}), std::vector<float>(static_cast<size_t>(4*H), 0.0f)),
-        });
-    }
+    w.predictor = assets.implementation->load_predictor(store, assets, st);
     w.decoder_projector = load_linear(store, source, "decoder.decoder_projector", st, H, H, true);
     w.joint_enc = load_linear(store, source, "encoder_projector", st, H, config.encoder.hidden_size, true);
     const int64_t jout = config.vocab_size + static_cast<int64_t>(config.durations.size());
@@ -222,7 +211,7 @@ std::shared_ptr<const ParakeetWeights> load_parakeet_weights(
     auto w = std::make_shared<ParakeetWeights>();
     w->store = std::make_shared<engine::core::BackendWeightStore>(backend, backend_type, "parakeet_tdt.weights", ctx_bytes);
     w->encoder = load_encoder_weights(*w->store, *assets.source, assets.config, matmul_st, conv_st);
-    w->decoder = load_decoder_weights(*w->store, *assets.source, assets.config, matmul_st);
+    w->decoder = load_decoder_weights(*w->store, *assets.source, assets, matmul_st);
     w->store->upload();
     assets.source->release_storage();
     debug::timing_log_scalar("parakeet_tdt.weights.upload_ms", engine::debug::elapsed_ms(t0, Clock::now()));

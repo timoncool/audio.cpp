@@ -1,4 +1,7 @@
 #include "ggml-cuda.h"
+#ifdef GGML_USE_HIP
+#include "ggml-hip/gfx1151_v1/gfx1151_v1.cuh"
+#endif
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
@@ -618,6 +621,15 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     std::unique_lock<std::mutex> lock(ggml_cuda_lock);
     ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
 
+#ifdef GGML_CUDA_CUDNN_CONV3D
+    if (conv3d_cudnn_handle != nullptr) {
+        ggml_cuda_set_device(device);
+        const cudnnStatus_t status = cudnnDestroy(conv3d_cudnn_handle);
+        if (status != CUDNN_STATUS_SUCCESS) {
+            GGML_ABORT("cuDNN Conv3D handle destruction failed: %s", cudnnGetErrorString(status));
+        }
+    }
+#endif
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
@@ -2755,6 +2767,17 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
+#ifdef GGML_USE_HIP
+    if (ctx.impl && ctx.impl->mul_mat) {
+        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
+        if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
+            ggml_backend_buffer_get_type(src1->buffer) == buft &&
+            ggml_backend_buffer_get_type(dst->buffer) == buft &&
+            ctx.impl->mul_mat(src0, src1, dst, ctx.stream(), ggml_cuda_info().devices[ctx.device].cc)) {
+            return;
+        }
+    }
+#endif
 
     if (dst->type == GGML_TYPE_F16) {
         GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
@@ -3281,6 +3304,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_CONV_2D:
             ggml_cuda_op_conv2d(ctx, dst);
+            break;
+        case GGML_OP_CONV_3D:
+            ggml_cuda_op_conv3d(ctx, dst);
             break;
         case GGML_OP_CONV_3D_CONCAT_PAD_SPATIAL_GEMM:
             ggml_cuda_op_conv3d_concat_pad_spatial_gemm(ctx, dst);
@@ -5664,6 +5690,40 @@ static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t d
     return ggml_backend_cuda_init(ctx->device);
 }
 
+#ifdef GGML_USE_HIP
+static const char * const * ggml_backend_hip_get_impls(ggml_backend_dev_t dev) {
+    const auto * ctx = static_cast<ggml_backend_cuda_device_context *>(dev->context);
+    static const char * const defaults[] = { "default", nullptr };
+    static const char * const gfx1151_v1[] = { "default", "gfx1151_v1", nullptr };
+    return GGML_CUDA_CC_IS_RDNA(ggml_cuda_info().devices[ctx->device].cc) ? gfx1151_v1 : defaults;
+}
+
+static ggml_backend_t ggml_backend_hip_init_with_impl(
+        ggml_backend_dev_t dev, const char * impl, const char * params) {
+    const auto * device = static_cast<ggml_backend_cuda_device_context *>(dev->context);
+    if (strcmp(impl, "gfx1151_v1") != 0 ||
+        !GGML_CUDA_CC_IS_RDNA(ggml_cuda_info().devices[device->device].cc)) {
+        GGML_LOG_ERROR("ROCm%d: implementation '%s' is unavailable on this device\n", device->device, impl);
+        return nullptr;
+    }
+    static const ggml_hip_impl gfx1151_v1 = {
+        "gfx1151_v1", ggml_hip_gfx1151_v1_mul_mat, ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy,
+    };
+    ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
+    if (backend) {
+        auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
+        ctx->impl = &gfx1151_v1;
+        GGML_LOG_INFO("ROCm%d: implementation=%s\n", device->device, ctx->impl->name);
+    }
+    return backend;
+}
+
+static const char * ggml_backend_hip_get_impl(ggml_backend_t backend) {
+    const auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
+    return ctx->impl ? ctx->impl->name : "default";
+}
+#endif
+
 static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *)dev->context;
     return ggml_backend_cuda_buffer_type(ctx->device);
@@ -5942,13 +6002,21 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 }
                 return false;
             } break;
+        case GGML_OP_RMS_NORM_CHANNELS_SILU:
+            if (op->type != GGML_TYPE_F16) {
+                return true;
+            }
+            return op->src[0] && op->src[1] &&
+                (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[1]->ne[0] == op->src[0]->ne[3] &&
+                ggml_are_same_shape(op, op->src[0]) && ggml_is_contiguous(op);
         case GGML_OP_SILU_BACK:
             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
             break;
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
         case GGML_OP_RMS_NORM_CHANNELS:
-        case GGML_OP_RMS_NORM_CHANNELS_SILU:
         case GGML_OP_RMS_NORM_CHANNELS_ADD_BIAS_SILU:
         case GGML_OP_L2_NORM:
             return true;
@@ -6025,6 +6093,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_CONV_TRANSPOSE_2D:
         case GGML_OP_POOL_2D:
             return true;
+        case GGML_OP_CONV_3D:
+            return ggml_cuda_supports_conv3d(op);
         case GGML_OP_CONV_3D_CONCAT_PAD_SPATIAL_GEMM:
             return op->src[0]->type == GGML_TYPE_F32 &&
                    op->src[1]->type == GGML_TYPE_F32 &&
@@ -6265,6 +6335,17 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
 
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
+#ifdef GGML_USE_HIP
+    if (strcmp(name, "ggml_backend_dev_get_impls") == 0) {
+        return (void *) ggml_backend_hip_get_impls;
+    }
+    if (strcmp(name, "ggml_backend_dev_init_with_impl") == 0) {
+        return (void *) ggml_backend_hip_init_with_impl;
+    }
+    if (strcmp(name, "ggml_backend_get_impl") == 0) {
+        return (void *) ggml_backend_hip_get_impl;
+    }
+#endif
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
         return (void *)ggml_backend_cuda_comm_init;
     }

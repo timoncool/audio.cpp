@@ -41,6 +41,26 @@ Open `http://127.0.0.1:8080`, install a model package from the model library,
 then select it in the matching studio tab. Replace `cuda` with a backend your
 binary and selected model support, such as `cpu`, `vulkan`, or `metal`.
 
+Models default to `models/` beside the server executable. To choose another
+startup folder, add `--models-root /path/to/models`, or set it in a config:
+
+```json
+{
+  "ui": true,
+  "ui_management": true,
+  "models_root": "/path/to/models",
+  "models": []
+}
+```
+
+`--models-root` overrides `models_root` in the config. Relative CLI paths use
+the working directory; relative config paths use the config file's directory.
+The WebUI reads the server's current folder on startup; an older browser-saved
+selection does not override it. Explicit changes in **Models** apply to the
+server and all connected clients, while folder history stays browser-local.
+**Use default** restores the startup folder. Restarting the server also restores
+that folder; changing it in the UI does not rewrite the config file.
+
 Use **Lib → Speakers → New speaker preset** to save a model, voice, and
 generation settings together, then select that speaker in **Apps → Text to
 speech**. **Lib → Voices** manages reference recordings and their transcripts.
@@ -284,7 +304,8 @@ individual model entries:
 ```
 
 The indices use audio.cpp's backend device order; run the server with
-`--list-devices` to inspect it. Each model remains wholly on one device: this
+`--list-devices` to inspect it, or `--list-devices --json` for PCI ids and
+free/total memory in [JSON](../../docs/usage.md#listing-devices). Each model remains wholly on one device: this
 setting assigns models independently and does not split one model across GPUs.
 `GET /v1/models` reports the effective `device` for every entry. Dynamic loads
 may also send `device`; when a registered model is reloaded and the field is
@@ -331,6 +352,29 @@ the task, the mode and the load and session options. When its family and task
 match the config's, the model keeps the config's `default_request_options`,
 `voice_presets`, `default_voice_preset`, `busy_timeout_ms` and `live_ingest`;
 a load of another family or task under that `id` gets none of them.
+
+### Loading an installed package by id
+
+A server built with `AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON` also lets
+`POST /v1/models/load` name an installed package with `package_id` instead of
+`path`, so a client does not need to know where the models root is:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/models/load \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"sep","package_id":"htdemucs_q8_0","task":"sep"}'
+```
+
+The server reads the package's metadata from the package manager and asks the
+family's loader, through `resolve_package_load`, for the path, family, load
+options and session options, the same target the WebUI loads. The request then
+goes through the existing load handler as if it had sent them. `family`
+defaults to the package's family; a different `family` is rejected. A
+`load_options` or `session_options` key the request sends wins over the
+resolved one. Each precision is its own package id, such as `kokoro_82m_q8_0`
+and `kokoro_82m_bf16`. Sending both `path` and `package_id` is rejected with
+400, and an unknown or not-installed package returns 404. Requests with
+`path`, and servers built without the native model manager, are unchanged.
 
 ### Paths and model specs
 
@@ -430,6 +474,7 @@ file. Starting the full UI without a config enables lazy loading automatically.
 | `max_loaded_models` | `0` | Maximum resident models; `0` disables the limit, `1` keeps one model resident. | `--max-loaded-models <n>` |
 | `idle_unload_ms` | `0` | Unload resident models after the server has had no model load/run activity for this long; `0` disables it. | `--idle-unload-ms <ms>` |
 | `min_free_memory_mb` | `0` | Free-memory headroom in MiB required after an estimated model load; `0` disables the guard. | `--min-free-memory-mb <mb>` |
+| `resample_kernel_cache_mb` | `32` | MiB of resampling kernels kept for reuse across requests, evicting the least recently used first; `0` disables the cache. A kernel larger than the limit, such as the 84.5 MiB one for 44056 Hz to 16 kHz, is rebuilt on every request; raise the limit for such inputs. | `--resample-kernel-cache-mb <mb>` |
 
 > [!WARNING]
 > Lazy loading does not unload a model after each request. Used models stay

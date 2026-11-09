@@ -57,6 +57,36 @@ std::filesystem::path write_config(
     return path;
 }
 
+void test_models_root() {
+    const auto root = make_temp_root();
+    const auto omitted = write_config(root, "omitted.json", R"({"ui_management":true,"models":[]})");
+    require(!minitts::server::load_server_config(omitted).models_root.has_value(),
+            "omitted models_root keeps the executable-local default");
+
+    const auto relative = write_config(
+        root, "relative.json", R"({"ui_management":true,"models_root":"shared models","models":[]})");
+    require(minitts::server::load_server_config(relative).models_root == root / "shared models",
+            "relative models_root is resolved against the config directory");
+
+    const auto absolute = write_config(root, "absolute.json",
+        "{\"ui_management\":true,\"models\":[],\"models_root\":" +
+        engine::io::json::stringify_string((root / "absolute models").generic_string()) + "}");
+    require(minitts::server::load_server_config(absolute).models_root == root / "absolute models",
+            "absolute models_root is preserved");
+
+    for (const auto * value : {"null", "true", "[]", "42", "\"\""}) {
+        const auto invalid = write_config(root, "invalid.json",
+            std::string("{\"ui_management\":true,\"models\":[],\"models_root\":") + value + "}");
+        bool rejected = false;
+        try {
+            (void) minitts::server::load_server_config(invalid);
+        } catch (const std::runtime_error & error) {
+            rejected = std::string(error.what()).find("models_root") != std::string::npos;
+        }
+        require(rejected, "invalid models_root must be rejected");
+    }
+}
+
 void test_inline_default_and_named_presets() {
     const auto root = make_temp_root();
     const auto config_path = write_config(
@@ -712,6 +742,38 @@ void test_negative_min_free_memory_mb_is_rejected() {
     require(rejected, "negative min_free_memory_mb is rejected");
 }
 
+void test_resample_kernel_cache_mb_defaults_and_overrides() {
+    const auto root = make_temp_root();
+
+    const auto default_path = write_config(
+        root, "resample_cache_default.json", std::string("{") + kMinimalModel + "}");
+    require(
+        !minitts::server::load_server_config(default_path).resample_kernel_cache_mb.has_value(),
+        "resample_kernel_cache_mb stays unset when omitted so the library default applies");
+
+    const auto set_path = write_config(
+        root, "resample_cache_set.json", std::string(R"JSON({"resample_kernel_cache_mb": 0,)JSON") + kMinimalModel + "}");
+    require(
+        minitts::server::load_server_config(set_path).resample_kernel_cache_mb == 0,
+        "resample_kernel_cache_mb is read from the config, including 0 to disable the cache");
+}
+
+void test_invalid_resample_kernel_cache_mb_is_rejected() {
+    const auto root = make_temp_root();
+    for (const std::string value : {"-1", "4294967296", "32.5", "\"32\"", "null"}) {
+        const auto config_path = write_config(
+            root, "resample_cache_invalid.json",
+            std::string(R"JSON({"resample_kernel_cache_mb": )JSON") + value + "," + kMinimalModel + "}");
+        bool rejected = false;
+        try {
+            (void) minitts::server::load_server_config(config_path);
+        } catch (const std::runtime_error & error) {
+            rejected = std::string(error.what()).find("resample_kernel_cache_mb") != std::string::npos;
+        }
+        require(rejected, "invalid resample_kernel_cache_mb is rejected: " + value);
+    }
+}
+
 void test_model_run_overrun_predicate() {
     using minitts::server::model_run_has_overrun;
 
@@ -1110,6 +1172,14 @@ void test_per_model_devices() {
 
 int main() {
     try {
+        {
+            const auto root = make_temp_root();
+            const auto path = write_config(root, "implementation.json", R"({"backend":"hip","backend_impl":"gfx1151_v1","ui_management":true,"models":[]})");
+            const auto config = minitts::server::load_server_config(path);
+            require(config.backend == engine::core::BackendType::Hip, "backend remains HIP");
+            require(config.backend_impl == "gfx1151_v1", "backend implementation selection");
+        }
+
         test_per_model_devices();
         test_model_slots();
         test_inline_default_and_named_presets();
@@ -1132,9 +1202,12 @@ int main() {
         test_negative_idle_unload_ms_is_rejected();
         test_min_free_memory_mb_defaults_and_overrides();
         test_negative_min_free_memory_mb_is_rejected();
+        test_resample_kernel_cache_mb_defaults_and_overrides();
+        test_invalid_resample_kernel_cache_mb_is_rejected();
         test_per_model_busy_timeout();
         test_negative_per_model_busy_timeout_is_rejected();
         test_ui_configuration();
+        test_models_root();
         test_configured_model_fields_are_inherited();
         test_empty_models_require_ui_management();
         test_request_timeout_is_clamped_to_policy();

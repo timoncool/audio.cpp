@@ -38,6 +38,7 @@ struct SpecBackedVoiceModelConfig {
         const std::unordered_map<std::string, std::string> &)> model_resources;
     // A single file that load_assets reads in place of a package (no package resources to discover).
     std::function<bool(const std::filesystem::path &)> reads_file;
+    std::function<PackageLoadTarget(const assets::ModelPackage &)> package_load;
 };
 
 inline std::shared_ptr<const engine::model_spec::ModelContract> require_model_contract(std::string family) {
@@ -217,6 +218,10 @@ public:
         } catch (const std::exception &) {
             return false;
         }
+    }
+
+    PackageLoadTarget resolve_package_load(const assets::ModelPackage & package) const override {
+        return config_.package_load ? config_.package_load(package) : IVoiceModelLoader::resolve_package_load(package);
     }
 
     ModelInspection inspect(const ModelLoadRequest & request) const override {
