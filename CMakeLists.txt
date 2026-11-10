@@ -537,6 +537,7 @@ add_library(engine_core OBJECT
     src/framework/core/deferred_tensor_writer.cpp
     src/framework/core/disk_expert_weight_store.cpp
     src/framework/core/graph_workspace.cpp
+    src/framework/core/prepared_graph.cpp
     src/framework/core/execution_context.cpp
     src/framework/core/host_memory.cpp
     src/framework/core/load_progress.cpp
@@ -647,6 +648,7 @@ add_library(engine_core OBJECT
     src/framework/modules/conditioning_modules.cpp
     src/framework/modules/conformer_modules.cpp
     src/framework/modules/ebranchformer_modules.cpp
+    src/framework/sampling/device_denoiser_runtime.cpp
     src/framework/sampling/flow_sampler_runtime.cpp
     src/framework/modules/predictor_modules.cpp
     src/framework/modules/positional_modules.cpp
@@ -3805,6 +3807,13 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
 
     add_engine_unittest(ctc_host_decoder_test tests/unittests/test_ctc_host_decoder.cpp)
     add_test(NAME ctc_host_decoder_test COMMAND ctc_host_decoder_test)
+    add_engine_unittest(device_denoiser_runtime_test tests/unittests/test_device_denoiser_runtime.cpp)
+    add_test(NAME device_denoiser_runtime_test COMMAND device_denoiser_runtime_test
+        --log ${CMAKE_CURRENT_BINARY_DIR}/device_denoiser_runtime_test.log)
+    add_engine_unittest(prepared_graph_test tests/unittests/test_prepared_graph.cpp)
+    target_include_directories(prepared_graph_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/ggml/src)
+    add_test(NAME prepared_graph_test COMMAND prepared_graph_test
+        --log ${CMAKE_CURRENT_BINARY_DIR}/prepared_graph_test.log)
     add_engine_unittest(rope_transformer_encoder_test tests/unittests/test_rope_transformer_encoder.cpp)
     add_test(NAME rope_transformer_encoder_test COMMAND rope_transformer_encoder_test)
     add_engine_unittest(shared_weight_cache_test tests/unittests/test_shared_weight_cache.cpp)
@@ -3953,6 +3962,12 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
     if(yue2 IN_LIST AUDIOCPP_LINKED_MODELS)
         add_engine_unittest(yue2_request_test tests/yue2/request_test.cpp)
         add_test(NAME yue2_request_test COMMAND yue2_request_test)
+        add_engine_unittest(yue2_attention_layout_test tests/yue2/attention_layout_test.cpp)
+        add_test(NAME yue2_attention_layout_test COMMAND yue2_attention_layout_test)
+        add_engine_unittest(yue2_nar_conditioning_test tests/yue2/nar_conditioning_test.cpp)
+        add_test(NAME yue2_nar_conditioning_test COMMAND yue2_nar_conditioning_test)
+        add_engine_unittest(yue2_nar_windowing_test tests/yue2/nar_windowing_test.cpp)
+        add_test(NAME yue2_nar_windowing_test COMMAND yue2_nar_windowing_test)
     endif()
 
     # Registered here rather than in the extended block below so it runs in the
@@ -4666,6 +4681,7 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
 
         if(fish_drama3 IN_LIST AUDIOCPP_LINKED_MODELS)
             add_engine_unittest(fish_drama3_backbone_allocation_test tests/community_models/fish_drama3/backbone_allocation_test.cpp)
+            target_include_directories(fish_drama3_backbone_allocation_test PRIVATE external/ggml/src)
             add_test(NAME fish_drama3_backbone_allocation_test COMMAND fish_drama3_backbone_allocation_test)
             add_engine_unittest(fish_drama3_codec_source_test tests/community_models/fish_drama3/codec_source_test.cpp)
             add_test(NAME fish_drama3_codec_source_test COMMAND fish_drama3_codec_source_test)
