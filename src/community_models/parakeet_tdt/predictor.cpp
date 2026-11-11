@@ -15,11 +15,15 @@ public:
         layers_.reserve(static_cast<size_t>(assets.config.decoder_layers));
         for (int64_t l = 0; l < assets.config.decoder_layers; ++l) {
             const std::string p = "decoder.lstm";
+            const std::string bias_hh = p + ".bias_hh_l" + std::to_string(l);
+            // transcribe.cpp GGUFs store bias_ih + bias_hh as a single bias_ih.
             layers_.push_back({
                 store.load_tensor(source, p + ".weight_ih_l" + std::to_string(l), storage_type, {4*H, H}),
                 store.load_tensor(source, p + ".weight_hh_l" + std::to_string(l), storage_type, {4*H, H}),
                 store.load_f32_tensor(source, p + ".bias_ih_l" + std::to_string(l), {4*H}),
-                store.load_f32_tensor(source, p + ".bias_hh_l" + std::to_string(l), {4*H}),
+                source.has_tensor(bias_hh)
+                    ? store.load_f32_tensor(source, bias_hh, {4*H})
+                    : store.make_f32(engine::core::TensorShape::from_dims({4*H}), std::vector<float>(static_cast<size_t>(4*H), 0.0f)),
             });
         }
     }
