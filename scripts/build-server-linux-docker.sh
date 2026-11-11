@@ -40,7 +40,8 @@ if [ "${1:-}" = "--inside" ]; then
     cpu) ;;
     *) echo "[ERROR] backend $backend: cuda, cuda12, vulkan or cpu"; exit 1 ;;
   esac
-  echo "[..] source $(git -c safe.directory=/src -C /src rev-parse --short HEAD), $backend"
+  version=$(git -c safe.directory=/src -C /src rev-parse --short=8 HEAD)
+  echo "[..] source $version, $backend"
   rm -rf /cache/src && mkdir -p /cache/src
   git -c safe.directory=/src -C /src archive HEAD | tar -x -C /cache/src
   cd /cache/src
@@ -49,7 +50,7 @@ if [ "${1:-}" = "--inside" ]; then
   cmake -B "/cache/build-$backend" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_LLAMAFILE=ON \
     -DENGINE_BUILD_TESTS=OFF -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF \
-    -DAUDIOCPP_BUILD_C_API=ON -DAUDIOCPP_VERSION=dev -DAUDIOCPP_MODEL_SET=full \
+    -DAUDIOCPP_BUILD_C_API=ON "-DAUDIOCPP_VERSION=$version" -DAUDIOCPP_MODEL_SET=full \
     -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
     '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../../models/higgs-engine;$ORIGIN/../../models/cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
