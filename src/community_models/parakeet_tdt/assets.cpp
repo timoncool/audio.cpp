@@ -65,12 +65,13 @@ const assets::transcribe_cpp::NameRules & subsampling_rules() {
     return rules;
 }
 
-std::shared_ptr<const ParakeetTDTAssets> load_transcribe_cpp_assets(const std::filesystem::path & path) {
+std::shared_ptr<const ParakeetTDTAssets> load_transcribe_cpp_assets(const std::filesystem::path & path, std::string_view family) {
     const assets::GgufMetadata metadata(path);
     if (metadata.require_string("stt.parakeet.head_kind") != "tdt") {
         throw std::runtime_error("transcribe.cpp Parakeet GGUF is not a TDT model: " + path.string());
     }
     auto assets = std::make_shared<ParakeetTDTAssets>();
+    assets->implementation = &implementation_for_family(family);
     auto & config = assets->config;
     config.model_type = "parakeet_tdt";
     config.vocab_size = metadata.require_int("stt.parakeet.predictor.vocab");
@@ -212,7 +213,7 @@ ParakeetConfig parse_config(const assets::ResourceBundle & resources) {
 
 std::shared_ptr<const ParakeetTDTAssets> load_parakeet_assets(
     const std::filesystem::path & model_path, std::string_view family) {
-    if (assets::transcribe_cpp::is_file(model_path, "tdt")) return load_transcribe_cpp_assets(model_path);
+    if (assets::transcribe_cpp::is_file(model_path, "tdt")) return load_transcribe_cpp_assets(model_path, family);
     auto resources = engine::model_spec::load_resource_bundle(
         model_path,
         engine::model_spec::default_spec_path(family));
