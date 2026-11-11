@@ -178,7 +178,7 @@ std::shared_ptr<const NemotronASRAssets> load_transcribe_cpp_assets(const std::f
     config.frontend.n_fft = metadata.require_int("stt.frontend.n_fft");
     config.frontend.win_length = metadata.require_int("stt.frontend.win_length");
     config.frontend.hop_length = metadata.require_int("stt.frontend.hop_length");
-    config.frontend.preemphasis = metadata.require_float("stt.frontend.pre_emphasis");
+    config.frontend.preemphasis = metadata.require_f32("stt.frontend.pre_emphasis");
 
     const auto locales = metadata.require_string_array("stt.parakeet.prompt.dictionary.locales");
     const auto indices = metadata.require_int_array("stt.parakeet.prompt.dictionary.indices");

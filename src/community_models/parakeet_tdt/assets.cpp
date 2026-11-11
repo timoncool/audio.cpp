@@ -78,7 +78,10 @@ std::shared_ptr<const ParakeetTDTAssets> load_transcribe_cpp_assets(const std::f
     config.decoder_hidden_size = metadata.require_int("stt.parakeet.predictor.hidden");
     config.decoder_layers = metadata.require_int("stt.parakeet.predictor.n_layers");
     config.max_symbols_per_step = metadata.require_int("stt.parakeet.tdt.max_symbols");
-    config.durations = metadata.require_int_array("stt.parakeet.tdt.durations");
+    config.durations.clear();
+    for (const int64_t duration : metadata.require_int_array("stt.parakeet.tdt.durations")) {
+        config.durations.push_back(static_cast<int32_t>(duration));
+    }
 
     config.encoder.hidden_size = metadata.require_int("stt.parakeet.encoder.d_model");
     config.encoder.intermediate_size = metadata.require_int("stt.parakeet.encoder.d_ff");
@@ -94,7 +97,7 @@ std::shared_ptr<const ParakeetTDTAssets> load_transcribe_cpp_assets(const std::f
     config.frontend.n_fft = metadata.require_int("stt.frontend.n_fft");
     config.frontend.win_length = metadata.require_int("stt.frontend.win_length");
     config.frontend.hop_length = metadata.require_int("stt.frontend.hop_length");
-    config.frontend.preemphasis = metadata.require_float("stt.frontend.pre_emphasis");
+    config.frontend.preemphasis = metadata.require_f32("stt.frontend.pre_emphasis");
 
     auto tokens = metadata.require_string_array("tokenizer.ggml.tokens");
     if (static_cast<int64_t>(tokens.size()) != config.vocab_size) {

@@ -2,6 +2,12 @@
 
 #include <gguf.h>
 
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+
+namespace engine::assets {
+
 GgufMetadata::GgufMetadata(const std::filesystem::path & path)
     : path_(path), context_(gguf_init_from_file(path.string().c_str(), {true, nullptr})) {
     if (!context_) {
