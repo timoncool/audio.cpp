@@ -32,7 +32,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
             -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_BUILD_TESTS=OFF \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF \
-            -DAUDIOCPP_VERSION=dev -DAUDIOCPP_MODEL_SET=full
+            "-DAUDIOCPP_VERSION=${TAG#server-}" -DAUDIOCPP_MODEL_SET=full
       - name: Build
         run: cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)" --target audiocpp_server
       - name: Package
@@ -45,6 +45,8 @@ jobs:
           otool -L dist/audiocpp_server
           otool -l dist/audiocpp_server | grep -A2 LC_RPATH
           ./dist/audiocpp_server --help | head -3
+          version=$(./dist/audiocpp_server --version | head -1)
+          [ "$version" = "audio.cpp ${TAG#server-}" ] || { echo "the program says '$version', not 'audio.cpp ${TAG#server-}'"; exit 1; }
           name=audiocpp-server-macos-arm64-metal.tar.gz
           tar -czf "$name" -C dist .
           shasum -a 256 "$name"; stat -f '%z %N' "$name"
