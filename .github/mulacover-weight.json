@@ -1,0 +1,21 @@
+[
+  {
+    "family": "mulacover",
+    "package": "mulacover_q8_0",
+    "default": true,
+    "repository": "audio-cpp/audio.cpp-gguf",
+    "revision": "32c1ce1fea57a513eb9386aa62408d47b1cf7ab2",
+    "gated": false,
+    "repository_license": "other",
+    "missing": [],
+    "files": [
+      {
+        "path": "MuLaCover-GGUF/mulacover-q8_0.gguf",
+        "bytes": 8220378496,
+        "git_blob": "ea5725c160db40c203fc41bcf9fda1b7d7c0f613",
+        "sha256": "5daca50ce959c63dcfef3be1e3a7cd855eee753a91cab1a3475da1af781e4518"
+      }
+    ],
+    "bytes": 8220378496
+  }
+]
