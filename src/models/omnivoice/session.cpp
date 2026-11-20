@@ -1,6 +1,7 @@
 #include "engine/models/omnivoice/session.h"
 
 #include "engine/framework/debug/profiler.h"
+#include "engine/framework/rknn/engine.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/runtime/spec_backed_model.h"
 #include "engine/framework/text/chunking.h"
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include <utility>
@@ -234,6 +236,50 @@ void append_cross_faded_chunk(
     }
 }
 
+// The Rockchip NPU sidecar for the diffusion-LM step: one compiled engine per total-token
+// bucket, registered up front because an engine takes seconds to init and the step loop needs
+// it ~32 times per utterance. The ladder travels as the exec_plan component's main artifact,
+// comma-separated, because the roles of an exec_plan artifact block are a closed vocabulary
+// while the ladder is not.
+std::vector<std::string> generator_rknn_engines_from_options(
+    const runtime::SessionOptions & options,
+    const OmniVoiceAssets & assets) {
+    const auto exec_plan = runtime::parse_exec_plan(
+        options.options,
+        "omnivoice.exec_plan",
+        {{"generator", "ggml",
+          {{"ggml", {options.backend.type}, {}, {}, {}},
+           {"rknn", {}, {"main"}, {}, {}},
+           {"rknn_zeroop", {}, {}, {}, {}}}}});
+    const auto & generator_plan = exec_plan.at("generator");
+    if (generator_plan.impl != "rknn") {
+        return {};
+    }
+    std::vector<std::string> engines;
+    std::istringstream paths(generator_plan.artifacts.at("main"));
+    std::string declared;
+    while (std::getline(paths, declared, ',')) {
+        if (!declared.empty()) {
+            engines.push_back(
+                engine::rknn::resolve_engine_path(declared, assets.resources.model_directory()));
+        }
+    }
+    return engines;
+}
+
+// The generator component's impl key ("rknn_zeroop" selects the vendor
+// rknn_matmul_api zero-op engine; no artifacts, no compiled ladders).
+std::string generator_rknn_impl_from_options(const runtime::SessionOptions & options) {
+    const auto exec_plan = runtime::parse_exec_plan(
+        options.options,
+        "omnivoice.exec_plan",
+        {{"generator", "ggml",
+          {{"ggml", {options.backend.type}, {}, {}, {}},
+           {"rknn", {}, {"main"}, {}, {}},
+           {"rknn_zeroop", {}, {}, {}, {}}}}});
+    return exec_plan.at("generator").impl;
+}
+
 }  // namespace
 
 OmniVoiceSession::OmniVoiceSession(
@@ -276,6 +322,8 @@ OmniVoiceSession::OmniVoiceSession(
           audio_tokenizer_weight_storage_type_,
           audio_tokenizer_codebook_weight_storage_type_),
       prompt_builder_(assets_, tokenizer_),
+      generator_rknn_engines_(generator_rknn_engines_from_options(options, *assets_)),
+      generator_rknn_zeroop_(generator_rknn_impl_from_options(options) == "rknn_zeroop"),
       generator_(
           assets_,
           execution_context(),
@@ -287,7 +335,9 @@ OmniVoiceSession::OmniVoiceSession(
           generator_perf_mode_,
           generator_packed_cfg_,
           generator_device_scoring_,
-          generator_packed_projections_) {
+          generator_packed_projections_,
+          generator_rknn_engines_,
+          generator_rknn_zeroop_) {
     engine::debug::trace_log_scalar("omnivoice.perf_mode", perf_mode_name(generator_perf_mode_));
     if (task_.task != runtime::VoiceTaskKind::Tts &&
         task_.task != runtime::VoiceTaskKind::VoiceCloning &&
@@ -482,7 +532,8 @@ runtime::TaskResult OmniVoiceSession::run(const runtime::TaskRequest & request) 
                 prompt.reference_audio_tokens.has_value()
                     ? std::make_optional(prompt.reference_audio_tokens->frames)
                     : std::optional<int64_t>(),
-                1.0F);
+                1.0F,
+                prompt.language);
             const int64_t duration_target = std::max<int64_t>(
                 1,
                 static_cast<int64_t>(std::llround(
@@ -644,7 +695,8 @@ std::vector<runtime::TaskResult> OmniVoiceSession::run_batch(const std::vector<r
                 item.prompt.reference_audio_tokens.has_value()
                     ? std::make_optional(item.prompt.reference_audio_tokens->frames)
                     : std::optional<int64_t>(),
-                1.0F);
+                1.0F,
+                item.prompt.language);
             const int64_t duration_target = std::max<int64_t>(
                 1,
                 static_cast<int64_t>(std::llround(
@@ -1015,7 +1067,8 @@ void OmniVoiceSession::initialize_streaming_request(const runtime::TaskRequest &
             prompt.reference_audio_tokens.has_value()
                 ? std::make_optional(prompt.reference_audio_tokens->frames)
                 : std::optional<int64_t>(),
-            1.0F);
+            1.0F,
+            prompt.language);
         const int64_t duration_target = std::max<int64_t>(
             1,
             static_cast<int64_t>(std::llround(

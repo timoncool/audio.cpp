@@ -825,9 +825,13 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
         return nullptr;
     }
 
-    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr);
-
-    return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, size);
+    const auto free_device = [](void * data) { CUDA_CHECK(cudaFree(data)); };
+    std::unique_ptr<void, decltype(free_device)> allocation(dev_ptr, free_device);
+    auto ctx = std::make_unique<ggml_backend_cuda_buffer_context>(buft_ctx->device, allocation.get());
+    allocation.release();
+    auto buffer = ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx.get(), size);
+    ctx.release();
+    return buffer;
 }
 
 static size_t ggml_backend_cuda_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
@@ -1553,10 +1557,12 @@ static ggml_backend_buffer_t ggml_backend_cuda_host_buffer_type_alloc_buffer(ggm
         return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
     }
 
-    ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
+    const auto free_host = [](void * data) { CUDA_CHECK(cudaFreeHost(data)); };
+    std::unique_ptr<void, decltype(free_host)> allocation(ptr, free_host);
+    ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(allocation.get(), size);
     buffer->buft = buft;
     buffer->iface.free_buffer = ggml_backend_cuda_host_buffer_free_buffer;
-
+    allocation.release();
     return buffer;
 }
 
@@ -3126,6 +3132,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     break;
                 case GGML_UNARY_OP_HARDSWISH:
                     ggml_cuda_op_hardswish(ctx, dst);
+                    break;
+                case GGML_UNARY_OP_RSQRT:
+                    ggml_cuda_op_rsqrt(ctx, dst);
                     break;
                 case GGML_UNARY_OP_EXP:
                     ggml_cuda_op_exp(ctx, dst);
@@ -5831,6 +5840,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_UNARY_OP_GELU_ERF:
                 case GGML_UNARY_OP_GELU_QUICK:
                 case GGML_UNARY_OP_TANH:
+                case GGML_UNARY_OP_RSQRT:
                 case GGML_UNARY_OP_EXP:
                 case GGML_UNARY_OP_EXPM1:
                 case GGML_UNARY_OP_SOFTPLUS:

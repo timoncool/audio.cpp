@@ -50,12 +50,15 @@ For adapter loading and merged GGUF export, see the [LoRA guide](lora.md).
 | Qwen3 TTS | `qwen3_tts` | `tts`, `clon`, `vdes` | [Qwen3 TTS](#qwen3-tts) |
 | sanoTTS voice family | `sanotts` | `tts` | [sanoTTS](#sanotts) |
 | Supertonic | `supertonic` | `tts` | [Supertonic](#supertonic) |
+| tiny-voca | `tiny_voca` | `tts` | [tiny-voca](models/tiny_voca.md) |
 | VibeVoice | `vibevoice` | `tts` | [VibeVoice](#vibevoice) |
 | VieNeu-TTS v3 Turbo | `vieneu_v3_turbo` (alias `vietneu_tts`) | `tts`, `clon` | [VieNeu-TTS v3 Turbo](models/vieneu_v3_turbo.md) |
 | VoxCPM1 | `voxcpm1` | `tts`, `clon` | [VoxCPM1](#voxcpm1) |
 | VoxCPM2 | `voxcpm2` | `tts`, `clon`, `vdes` | [VoxCPM2](#voxcpm2) |
 | Voxtral 4B TTS | `voxtral_tts` | `tts` | [Voxtral TTS](models/voxtral_tts.md) |
 | XTTS v2 | `xtts_v2` | `tts` | [XTTS v2](community_models/xtts_v2.md) |
+| ZONOS2 | `zonos2` | `tts`, `clon` | [ZONOS2](models/zonos2.md) |
+| ZONOS3-Mini | `zonos3` | `tts`, `clon` | [ZONOS3-Mini](models/zonos3.md) |
 
 This page covers speech TTS-style families. MiniMax-H3 appears here for prompt-driven dialogue audio, but it uses the generation route (`--task gen`) rather than the normal speech route (`--task tts`). Detailed route manuals live under `docs/models/` or `docs/models/` when a model needs more space.
 
@@ -151,7 +154,8 @@ settings for subsequent requests in that session.
 | `chatterbox.weight_type` | `native`, `f32`, `f16`, `bf16`, `q8_0` | not set | Weight storage type; defaults to native. |
 | `chatterbox.t3_weight_type` | `native`, `f32`, `f16`, `bf16`, `q8_0` | shared setting | T3 weight storage; inherits weight_type. |
 | `chatterbox.multilingual_t3` | `v2`, `v3` | `v2` | Multilingual T3 checkpoint selection. |
-| `chatterbox.conditionals_cache_slots` | integer >= 0 | `1` | Cached speaker conditionals; zero disables reuse. |
+| `chatterbox.conditionals_cache_slots` | integer >= 0 | `1` | Cached speaker conditionals, one per voice and language; zero disables reuse. They survive language changes between multilingual languages (every language but English), so a voice heard in several of them needs a slot per language. |
+| `chatterbox.vc_reference_cache_slots` | integer >= 0 | `1` | Cached voice-conversion target references (`--task vc`), so converting into the same voice again skips preparing it; zero disables reuse. |
 | `chatterbox.mem_saver` | bool | `false` | Release staged runtime components. |
 | `chatterbox.encoder_condition_samples` | integer | `96000` | Tokenizer reference sample limit at 16 kHz; the voice encoder uses the full reference. |
 | `chatterbox.decoder_condition_samples` | integer | `240000` | S3Gen reference sample limit at 24 kHz. |

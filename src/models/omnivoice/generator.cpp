@@ -14,6 +14,8 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
 #include "engine/framework/modules/weight_binding.h"
+#include "engine/models/omnivoice/rknn_generator.h"
+#include "engine/models/omnivoice/rknn_zeroop_generator.h"
 
 #include <ggml-backend.h>
 #include <ggml.h>
@@ -21,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -28,8 +31,8 @@
 #include <optional>
 #include <random>
 #include <sstream>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <chrono>
@@ -1082,6 +1085,14 @@ public:
     virtual void rebuild(const std::vector<GraphItemShape> & items) = 0;
     virtual void prepare_request(const std::vector<PackedInputs> & inputs, const std::vector<float> & guidance_scales) = 0;
     virtual void update_generated_target_tokens(const std::vector<PackedInputs> & inputs) = 0;
+    // Whether this graph is the front-shard tail (hidden-state input instead of token inputs).
+    virtual bool is_front_shard() const noexcept { return false; }
+    // Front-shard graphs only: upload the NPU engine's [2*batch, total, hidden] hidden rows
+    // (the graph's own row-major input layout) in place of the token inputs.
+    virtual void set_hidden(const std::vector<float> & hidden) {
+        (void)hidden;
+        throw std::runtime_error("OmniVoice generator graph was built without a hidden-state input");
+    }
     // Whether compute() can return greedy best tokens scored on the device.
     virtual bool computes_best_tokens() const noexcept = 0;
     virtual GraphStepOutputs compute(bool read_logits, bool read_best_tokens, double & compute_ms, double & readback_ms) = 0;
@@ -1102,12 +1113,14 @@ public:
         const std::vector<GraphItemShape> & items,
         OmniVoiceGeneratorPerfMode perf_mode,
         bool packed_cfg,
-        bool device_scoring)
+        bool device_scoring,
+        bool front_shard = false)
         : runtime_(std::move(runtime)),
           graph_arena_bytes_(graph_arena_bytes),
           perf_mode_(perf_mode),
           packed_cfg_(packed_cfg),
-          device_scoring_(device_scoring) {
+          device_scoring_(device_scoring),
+          front_shard_(front_shard) {
         rebuild(items);
     }
 
@@ -1131,6 +1144,9 @@ public:
     }
 
     void rebuild(const std::vector<GraphItemShape> & items) override {
+        if (front_shard_ && !packed_cfg_) {
+            throw std::runtime_error("OmniVoice front-shard generator graph requires the packed CFG layout");
+        }
         const GraphCapacity capacity(items);
         const auto clear_start = Clock::now();
         clear_graph();
@@ -1180,68 +1196,91 @@ public:
             runtime_->backend_type()};
 
         std::array<core::TensorValue, 8> audio_id_values = {};
-
-        auto text_ids = core::make_tensor(input_ctx, GGML_TYPE_I32, token_ids_shape);
-        text_ids_ = text_ids.tensor;
-        ggml_set_input(text_ids_);
-        for (int64_t codebook = 0; codebook < config.num_audio_codebook; ++codebook) {
-            auto audio_ids = core::make_tensor(input_ctx, GGML_TYPE_I32, token_ids_shape);
-            audio_ids_[static_cast<size_t>(codebook)] = audio_ids.tensor;
-            ggml_set_input(audio_ids_[static_cast<size_t>(codebook)]);
-            audio_id_values[static_cast<size_t>(codebook)] = audio_ids;
+        core::TensorValue x;
+        core::TensorValue text_ids;
+        core::TensorValue audio_mask;
+        core::TensorValue text_mask;
+        core::TensorValue positions;
+        if (front_shard_) {
+            // The front-shard engine (the producer's --front-k) ran the embedding mix and every
+            // decoder layer on the NPU and hands over the post-layer hidden state as a graph
+            // input; this graph starts at the final RMS norm. Measured reason for the split
+            // (PC simulator, real step-0 feed): the full graph's fp16 audio heads put the
+            // uncond logits at 26.9 dB SNR - past the diffusion-LM decoding knife-edge, so
+            // guidance > 0 renders noise - while the same fp16 backbone leaves the hidden state
+            // at 67 dB, and with this fp32 tail the guided logits return to ~84 dB.
+            auto hidden_in = core::make_tensor(
+                input_ctx,
+                GGML_TYPE_F32,
+                core::TensorShape::from_dims({token_dim0, token_dim1, config.llm.hidden_size}));
+            hidden_in_ = hidden_in.tensor;
+            ggml_set_input(hidden_in_);
+            x = hidden_in;
+        } else {
+            text_ids = core::make_tensor(input_ctx, GGML_TYPE_I32, token_ids_shape);
+            text_ids_ = text_ids.tensor;
+            ggml_set_input(text_ids_);
+            for (int64_t codebook = 0; codebook < config.num_audio_codebook; ++codebook) {
+                auto audio_ids = core::make_tensor(input_ctx, GGML_TYPE_I32, token_ids_shape);
+                audio_ids_[static_cast<size_t>(codebook)] = audio_ids.tensor;
+                ggml_set_input(audio_ids_[static_cast<size_t>(codebook)]);
+                audio_id_values[static_cast<size_t>(codebook)] = audio_ids;
+            }
+            audio_mask = core::make_tensor(input_ctx, GGML_TYPE_F32, token_mask_shape);
+            text_mask = core::make_tensor(input_ctx, GGML_TYPE_F32, token_mask_shape);
+            audio_mask_ = audio_mask.tensor;
+            text_mask_ = text_mask.tensor;
+            ggml_set_input(audio_mask_);
+            ggml_set_input(text_mask_);
+            const int64_t position_count = packed_cfg_ ? flat_tokens : total_tokens_capacity_;
+            positions_ =
+                core::make_tensor(input_ctx, GGML_TYPE_I32, core::TensorShape::from_dims({position_count})).tensor;
+            ggml_set_input(positions_);
+            positions =
+                core::wrap_tensor(positions_, core::TensorShape::from_dims({position_count}), GGML_TYPE_I32);
         }
-        auto audio_mask = core::make_tensor(input_ctx, GGML_TYPE_F32, token_mask_shape);
-        auto text_mask = core::make_tensor(input_ctx, GGML_TYPE_F32, token_mask_shape);
-        audio_mask_ = audio_mask.tensor;
-        text_mask_ = text_mask.tensor;
-        ggml_set_input(audio_mask_);
-        ggml_set_input(text_mask_);
-        const int64_t position_count = packed_cfg_ ? flat_tokens : total_tokens_capacity_;
-        positions_ =
-            core::make_tensor(input_ctx, GGML_TYPE_I32, core::TensorShape::from_dims({position_count})).tensor;
-        ggml_set_input(positions_);
-        auto positions =
-            core::wrap_tensor(positions_, core::TensorShape::from_dims({position_count}), GGML_TYPE_I32);
         auto target_indices =
             core::make_tensor(input_ctx, GGML_TYPE_I32, core::TensorShape::from_dims({rows * target_frame_capacity_}));
         target_indices_ = target_indices.tensor;
         ggml_set_input(target_indices_);
-        // Unpacked graphs use one [rows, 1, capacity, capacity] mask. Packed
-        // graphs give every attention segment its own [rows, 1, tokens, tokens]
-        // mask input, so each mask starts at an offset the backend allocator
-        // aligned: views into one shared buffer start at arbitrary offsets,
-        // which backends such as Vulkan reject.
-        const ggml_type mask_type = f16_attention ? GGML_TYPE_F16 : GGML_TYPE_F32;
-        segment_masks_.clear();
         std::vector<AttentionSegment> segments;
         core::TensorValue attention_mask;
-        if (packed_cfg_) {
-            // Consecutive rows of equal length share one attention segment.
-            for (int64_t first = 0; first < rows;) {
-                const int64_t tokens = host_.row_tokens(first);
-                int64_t end = first + 1;
-                while (end < rows && host_.row_tokens(end) == tokens) {
-                    ++end;
+        if (!front_shard_) {
+            // Unpacked graphs use one [rows, 1, capacity, capacity] mask. Packed
+            // graphs give every attention segment its own [rows, 1, tokens, tokens]
+            // mask input, so each mask starts at an offset the backend allocator
+            // aligned: views into one shared buffer start at arbitrary offsets,
+            // which backends such as Vulkan reject.
+            const ggml_type mask_type = f16_attention ? GGML_TYPE_F16 : GGML_TYPE_F32;
+            segment_masks_.clear();
+            if (packed_cfg_) {
+                // Consecutive rows of equal length share one attention segment.
+                for (int64_t first = 0; first < rows;) {
+                    const int64_t tokens = host_.row_tokens(first);
+                    int64_t end = first + 1;
+                    while (end < rows && host_.row_tokens(end) == tokens) {
+                        ++end;
+                    }
+                    const int64_t segment_rows = end - first;
+                    auto mask = core::make_tensor(
+                        input_ctx, mask_type, core::TensorShape::from_dims({segment_rows, 1, tokens, tokens}));
+                    ggml_set_input(mask.tensor);
+                    segment_masks_.push_back({
+                        mask.tensor,
+                        host_.attention_offset(first),
+                        host_.attention_offset(end) - host_.attention_offset(first),
+                    });
+                    segments.push_back({static_cast<int64_t>(host_.row_offset(first)), segment_rows, tokens, mask});
+                    first = end;
                 }
-                const int64_t segment_rows = end - first;
-                auto mask = core::make_tensor(
-                    input_ctx, mask_type, core::TensorShape::from_dims({segment_rows, 1, tokens, tokens}));
-                ggml_set_input(mask.tensor);
-                segment_masks_.push_back({
-                    mask.tensor,
-                    host_.attention_offset(first),
-                    host_.attention_offset(end) - host_.attention_offset(first),
-                });
-                segments.push_back({static_cast<int64_t>(host_.row_offset(first)), segment_rows, tokens, mask});
-                first = end;
+            } else {
+                attention_mask = core::make_tensor(
+                    input_ctx,
+                    mask_type,
+                    core::TensorShape::from_dims({rows, 1, total_tokens_capacity_, total_tokens_capacity_}));
+                attention_mask_ = attention_mask.tensor;
+                ggml_set_input(attention_mask_);
             }
-        } else {
-            attention_mask = core::make_tensor(
-                input_ctx,
-                mask_type,
-                core::TensorShape::from_dims({rows, 1, total_tokens_capacity_, total_tokens_capacity_}));
-            attention_mask_ = attention_mask.tensor;
-            ggml_set_input(attention_mask_);
         }
         auto guidance_scales =
             core::make_tensor(input_ctx, GGML_TYPE_F32, core::TensorShape::from_dims({batch_capacity_}));
@@ -1256,14 +1295,16 @@ public:
             ggml_set_input(index_ramp_);
         }
 
-        auto x = build_embeddings(ctx, config, weights, text_ids, audio_id_values, audio_mask, text_mask);
-        if (packed_cfg_) {
-            for (const auto & layer : weights.layers) {
-                x = packed_decoder_layer(ctx, x, positions, layer, config.llm, segments, perf_mode_);
-            }
-        } else {
-            for (const auto & layer : weights.layers) {
-                x = decoder_layer(ctx, x, positions, layer, config.llm, attention_mask, perf_mode_);
+        if (!front_shard_) {
+            x = build_embeddings(ctx, config, weights, text_ids, audio_id_values, audio_mask, text_mask);
+            if (packed_cfg_) {
+                for (const auto & layer : weights.layers) {
+                    x = packed_decoder_layer(ctx, x, positions, layer, config.llm, segments, perf_mode_);
+                }
+            } else {
+                for (const auto & layer : weights.layers) {
+                    x = decoder_layer(ctx, x, positions, layer, config.llm, attention_mask, perf_mode_);
+                }
             }
         }
         logits_ = build_guided_logits(
@@ -1307,8 +1348,10 @@ public:
         rebuild_alloc_ms_ = engine::debug::elapsed_ms(alloc_start, alloc_end);
 
         const auto init_start = Clock::now();
-        const auto & position_values = packed_cfg_ ? host_.flat_positions : host_.positions;
-        ggml_backend_tensor_set(positions_, position_values.data(), 0, position_values.size() * sizeof(int32_t));
+        if (positions_ != nullptr) {
+            const auto & position_values = packed_cfg_ ? host_.flat_positions : host_.positions;
+            ggml_backend_tensor_set(positions_, position_values.data(), 0, position_values.size() * sizeof(int32_t));
+        }
         if (device_scoring_) {
             std::vector<float> mask_bias(static_cast<size_t>(config.audio_vocab_size), 0.0F);
             mask_bias[static_cast<size_t>(config.audio_mask_id)] = std::numeric_limits<float>::lowest();
@@ -1328,28 +1371,35 @@ public:
 
     void prepare_request(const std::vector<PackedInputs> & inputs, const std::vector<float> & guidance_scales) override {
         host_.prepare(inputs, guidance_scales);
-        upload_token_ids();
+        if (!front_shard_) {
+            upload_token_ids();
+        }
         if (host_.take_layout_dirty()) {
-            ggml_backend_tensor_set(audio_mask_, host_.audio_mask.data(), 0, host_.audio_mask.size() * sizeof(float));
-            ggml_backend_tensor_set(text_mask_, host_.text_mask.data(), 0, host_.text_mask.size() * sizeof(float));
-            const bool f16_mask = perf_mode_ == OmniVoiceGeneratorPerfMode::FlashAttention;
-            const auto upload_mask = [&](ggml_tensor * tensor, size_t first_value, size_t values) {
-                if (f16_mask) {
-                    ggml_backend_tensor_set(
-                        tensor, host_.attention_f16.data() + first_value, 0, values * sizeof(ggml_fp16_t));
+            if (!front_shard_) {
+                ggml_backend_tensor_set(
+                    audio_mask_, host_.audio_mask.data(), 0, host_.audio_mask.size() * sizeof(float));
+                ggml_backend_tensor_set(
+                    text_mask_, host_.text_mask.data(), 0, host_.text_mask.size() * sizeof(float));
+                const bool f16_mask = perf_mode_ == OmniVoiceGeneratorPerfMode::FlashAttention;
+                const auto upload_mask = [&](ggml_tensor * tensor, size_t first_value, size_t values) {
+                    if (f16_mask) {
+                        ggml_backend_tensor_set(
+                            tensor, host_.attention_f16.data() + first_value, 0, values * sizeof(ggml_fp16_t));
+                    } else {
+                        ggml_backend_tensor_set(
+                            tensor, host_.attention_f32.data() + first_value, 0, values * sizeof(float));
+                    }
+                };
+                if (packed_cfg_) {
+                    for (const auto & mask : segment_masks_) {
+                        upload_mask(mask.tensor, mask.first_value, mask.values);
+                    }
                 } else {
-                    ggml_backend_tensor_set(tensor, host_.attention_f32.data() + first_value, 0, values * sizeof(float));
+                    upload_mask(
+                        attention_mask_,
+                        0,
+                        f16_mask ? host_.attention_f16.size() : host_.attention_f32.size());
                 }
-            };
-            if (packed_cfg_) {
-                for (const auto & mask : segment_masks_) {
-                    upload_mask(mask.tensor, mask.first_value, mask.values);
-                }
-            } else {
-                upload_mask(
-                    attention_mask_,
-                    0,
-                    f16_mask ? host_.attention_f16.size() : host_.attention_f32.size());
             }
             ggml_backend_tensor_set(
                 target_indices_,
@@ -1368,6 +1418,9 @@ public:
 
     void update_generated_target_tokens(const std::vector<PackedInputs> & inputs) override {
         host_.update_targets(inputs);
+        if (front_shard_) {
+            return;  // the shard step reads tokens through the NPU engine, not graph inputs
+        }
         for (int64_t codebook = 0; codebook < runtime_->assets().config.num_audio_codebook; ++codebook) {
             const auto & ids = host_.audio_ids[static_cast<size_t>(codebook)];
             ggml_backend_tensor_set(audio_ids_[static_cast<size_t>(codebook)], ids.data(), 0, ids.size() * sizeof(int32_t));
@@ -1376,6 +1429,10 @@ public:
 
     bool computes_best_tokens() const noexcept override {
         return device_scoring_;
+    }
+
+    bool is_front_shard() const noexcept override {
+        return front_shard_;
     }
 
     GraphStepOutputs compute(bool read_logits, bool read_best_tokens, double & compute_ms, double & readback_ms) override {
@@ -1426,6 +1483,12 @@ public:
     int64_t target_frame_capacity() const noexcept override {
         return target_frame_capacity_;
     }
+    void set_hidden(const std::vector<float> & hidden) override {
+        if (hidden_in_ == nullptr) {
+            throw std::runtime_error("OmniVoice generator graph was built without a hidden-state input");
+        }
+        ggml_backend_tensor_set(hidden_in_, hidden.data(), 0, hidden.size() * sizeof(float));
+    }
     double rebuild_clear_ms() const noexcept override { return rebuild_clear_ms_; }
     double rebuild_build_ms() const noexcept override { return rebuild_build_ms_; }
     double rebuild_alloc_ms() const noexcept override { return rebuild_alloc_ms_; }
@@ -1460,6 +1523,7 @@ private:
         index_ramp_ = nullptr;
         guidance_scales_ = nullptr;
         attention_mask_ = nullptr;
+        hidden_in_ = nullptr;
         segment_masks_.clear();
         target_indices_ = nullptr;
         positions_ = nullptr;
@@ -1493,6 +1557,10 @@ private:
     ggml_tensor * target_indices_ = nullptr;
     // Unpacked layout only; the packed layout uses segment_masks_.
     ggml_tensor * attention_mask_ = nullptr;
+    // Front-shard layout only: the NPU engine's post-layer hidden rows, in place of the
+    // token/mask/position inputs.
+    ggml_tensor * hidden_in_ = nullptr;
+    bool front_shard_ = false;
     // One mask input per attention segment of the packed layout, with the
     // range of host mask values it receives.
     struct SegmentMask {
@@ -1795,6 +1863,22 @@ void update_generated_tokens(
     }
 }
 
+// Snapshot of one request's packed inputs for one engine step. Rebuilt per step
+// because update_generated_tokens() rewrites the audio rows in place; the copy
+// itself is a few tens of KB.
+OmniVoiceRknnStepInputs rknn_step_inputs(const PackedInputs & packed, float guidance) {
+    OmniVoiceRknnStepInputs out;
+    out.total_tokens = packed.total_tokens();
+    out.audio_start = packed.style_tokens + packed.text_tokens;
+    out.target_frames = packed.target_frames;
+    out.conditional_ids = packed.conditional_audio_ids;
+    out.unconditional_ids = packed.unconditional_audio_ids;
+    out.conditional_text_ids = packed.conditional_text_ids;
+    out.unconditional_text_ids = packed.unconditional_text_ids;
+    out.guidance = guidance;
+    return out;
+}
+
 }  // namespace
 
 struct OmniVoiceQwen3DiffusionRuntime::Impl {
@@ -1802,6 +1886,10 @@ struct OmniVoiceQwen3DiffusionRuntime::Impl {
     size_t graph_arena_bytes = 0;
     std::shared_ptr<Qwen3DiffusionWeightsRuntime> runtime;
     std::unique_ptr<Qwen3DiffusionGraph> forward_graph;
+    // Rockchip NPU sidecar for the step graph; null on every host without ENGINE_ENABLE_RKNN
+    // and on deployments that did not declare the ladder. When set and a request fits the
+    // ladder, the step loop runs on it and no ggml step graph is built.
+    std::unique_ptr<OmniVoiceRknnGenerator> rknn;
     bool mem_saver = false;
     OmniVoiceGeneratorPerfMode perf_mode = OmniVoiceGeneratorPerfMode::Standard;
     bool packed_cfg = true;
@@ -1821,7 +1909,9 @@ OmniVoiceQwen3DiffusionRuntime::OmniVoiceQwen3DiffusionRuntime(
     OmniVoiceGeneratorPerfMode perf_mode,
     bool packed_cfg,
     bool device_scoring,
-    bool packed_projections)
+    bool packed_projections,
+    std::vector<std::string> rknn_engine_paths,
+    bool rknn_zeroop)
     : impl_(std::make_unique<Impl>()) {
     if (assets == nullptr) {
         throw std::runtime_error("OmniVoice generator requires assets");
@@ -1841,6 +1931,87 @@ OmniVoiceQwen3DiffusionRuntime::OmniVoiceQwen3DiffusionRuntime(
     impl_->perf_mode = perf_mode;
     impl_->packed_cfg = packed_cfg;
     impl_->device_scoring = device_scoring;
+    if (!rknn_engine_paths.empty()) {
+        impl_->rknn = std::make_unique<OmniVoiceRknnGenerator>(
+            std::move(rknn_engine_paths),
+            impl_->assets->config.num_audio_codebook,
+            impl_->assets->config.audio_vocab_size,
+            impl_->assets->config.llm.head_dim,
+            impl_->assets->config.llm.rope_theta,
+            impl_->assets->config.llm.hidden_size);
+    }
+    if (rknn_zeroop) {
+        // The trunk runs on the vendor zero-op rknn_matmul API (librknnrt
+        // only): weights are packed once into the native tiled layouts (disk
+        // cache under <model dir>/rknn-zeroop-cache, override with
+        // AUDIOCPP_RKNN_ZEROOP_CACHE) and the geometry is built at runtime,
+        // so this impl needs no artifacts.
+        const auto & w = impl_->runtime->weights();
+        const auto & cfg = impl_->assets->config;
+        OmniVoiceZeroopWeightViews views;
+        const int64_t dim = head_dim(cfg.llm);
+        views.layers.reserve(w.layers.size());
+        auto is_f16 = [](const core::TensorValue & t) {
+            if (t.tensor->type == GGML_TYPE_F16) return true;
+            if (t.tensor->type == GGML_TYPE_F32) return false;
+            throw std::runtime_error(
+                "omnivoice.exec_plan generator impl rknn_zeroop: the vendor engine converts "
+                "only F16/F32 weight stores, got " +
+                std::string(ggml_type_name(t.tensor->type)));
+        };
+        for (const auto & l : w.layers) {
+            OmniVoiceZeroopLayerView v;
+            v.packed = l.qkv_proj.valid();
+            v.qkv = v.packed ? l.qkv_proj.tensor->data : nullptr;
+            v.q = v.packed ? nullptr : l.q_proj.tensor->data;
+            v.k = v.packed ? nullptr : l.k_proj.tensor->data;
+            v.v = v.packed ? nullptr : l.v_proj.tensor->data;
+            v.o = l.o_proj.tensor->data;
+            v.gate_up = v.packed ? l.gate_up_proj.tensor->data : nullptr;
+            v.gate = v.packed ? nullptr : l.gate_proj.tensor->data;
+            v.up = v.packed ? nullptr : l.up_proj.tensor->data;
+            v.down = l.down_proj.tensor->data;
+            v.n_in = l.input_norm.tensor->data;
+            v.n_post = l.post_norm.tensor->data;
+            v.n_qn = l.q_norm.tensor->data;
+            v.n_kn = l.k_norm.tensor->data;
+            v.qkv_is_f16 = v.packed ? is_f16(l.qkv_proj) : is_f16(l.q_proj);
+            v.gu_is_f16 = v.packed ? is_f16(l.gate_up_proj) : is_f16(l.gate_proj);
+            v.o_is_f16 = is_f16(l.o_proj);
+            v.down_is_f16 = is_f16(l.down_proj);
+            v.norms_is_f16 = is_f16(l.input_norm) && is_f16(l.post_norm) && is_f16(l.q_norm) && is_f16(l.k_norm);
+            views.layers.push_back(v);
+        }
+        views.text_embedding = w.text_embedding.tensor->data;
+        views.text_embedding_rows = cfg.llm.vocab_size;
+        views.audio_embedding = w.audio_embedding.tensor->data;
+        views.audio_embedding_rows = cfg.num_audio_codebook * cfg.audio_vocab_size;
+        views.text_embedding_is_f16 = is_f16(w.text_embedding);
+        views.audio_embedding_is_f16 = is_f16(w.audio_embedding);
+        OmniVoiceZeroopModelDims dims;
+        dims.codebooks = cfg.num_audio_codebook;
+        dims.audio_vocab = cfg.audio_vocab_size;
+        dims.heads = cfg.llm.num_attention_heads;
+        dims.kv_heads = cfg.llm.num_key_value_heads;
+        dims.head_dim = dim;
+        dims.hidden = cfg.llm.hidden_size;
+        dims.intermediate = cfg.llm.intermediate_size;
+        dims.rope_theta = cfg.llm.rope_theta;
+        std::string sidecar_cache;
+        const char * cache_env = std::getenv("AUDIOCPP_RKNN_ZEROOP_CACHE");
+        if (cache_env != nullptr) {
+            sidecar_cache = cache_env;
+        } else {
+            sidecar_cache = (impl_->assets->resources.model_directory() / "rknn-zeroop-cache").string();
+        }
+#if defined(ENGINE_HAVE_RKNN)
+        impl_->rknn = std::make_unique<OmniVoiceRknnZeroopGenerator>(
+            views, dims, sidecar_cache, "omnivoice-zeroop-v1");
+#else
+        throw std::runtime_error(
+            "omnivoice.exec_plan generator impl rknn_zeroop: built without ENGINE_ENABLE_RKNN");
+#endif
+    }
 }
 
 OmniVoiceQwen3DiffusionRuntime::~OmniVoiceQwen3DiffusionRuntime() = default;
@@ -1978,44 +2149,92 @@ std::vector<OmniVoiceGeneratedAudioTokens> OmniVoiceQwen3DiffusionRuntime::gener
     impl_->last_stats.rebuild_build_ms = 0.0;
     impl_->last_stats.rebuild_alloc_ms = 0.0;
     impl_->last_stats.rebuild_init_ms = 0.0;
-    std::vector<GraphItemShape> shapes(batch);
-    for (size_t item = 0; item < batch; ++item) {
-        shapes[item] = {inputs[item].total_tokens(), inputs[item].target_frames};
-    }
-    const bool needs_rebuild =
-        impl_->forward_graph == nullptr || !impl_->forward_graph->matches(*impl_->runtime, shapes);
-    if (needs_rebuild) {
-        const auto rebuild_start = Clock::now();
-        if (impl_->forward_graph == nullptr) {
-            if (impl_->mem_saver) {
-                impl_->forward_graph = std::make_unique<Qwen3DiffusionLayerwiseGraph>(
-                    impl_->runtime,
-                    impl_->graph_arena_bytes,
-                    shapes);
-            } else {
-                impl_->forward_graph = std::make_unique<Qwen3DiffusionForwardGraph>(
-                    impl_->runtime,
-                    impl_->graph_arena_bytes,
-                    shapes,
-                    impl_->perf_mode,
-                    impl_->packed_cfg,
-                    impl_->device_scoring);
-            }
-        } else {
-            impl_->forward_graph->rebuild(shapes);
+    // The RKNN ladder path: one bucket covers the whole batch, the way the shared graph does.
+    // If any request exceeds the largest rung the whole step loop falls back to the ggml graph,
+    // which the caller always keeps.
+    int64_t rknn_bucket = 0;
+    if (impl_->rknn != nullptr) {
+        int64_t max_total = 0;
+        for (const auto & input : inputs) {
+            max_total = std::max(max_total, input.total_tokens());
         }
-        const auto rebuild_end = Clock::now();
-        impl_->last_stats.graph_rebuilt = true;
-        impl_->last_stats.rebuild_ms = engine::debug::elapsed_ms(rebuild_start, rebuild_end);
-        impl_->last_stats.rebuild_clear_ms = impl_->forward_graph->rebuild_clear_ms();
-        impl_->last_stats.rebuild_build_ms = impl_->forward_graph->rebuild_build_ms();
-        impl_->last_stats.rebuild_alloc_ms = impl_->forward_graph->rebuild_alloc_ms();
-        impl_->last_stats.rebuild_init_ms = impl_->forward_graph->rebuild_init_ms();
+        rknn_bucket = impl_->rknn->bucket_for(max_total);
+        // A front-shard engine pass writes one CFG pair (cond row 0, uncond row 1 at a
+        // row-capacity stride), which is the host row layout only at batch 1 (the host packs
+        // all cond rows first). Batched shard requests fall back to the ggml graph; served
+        // traffic is batch 1.
+        if (rknn_bucket > 0 && impl_->rknn->front_shard() && batch > 1) {
+            engine::debug::trace_log_scalar("omnivoice.generator.rknn.fallback_batched",
+                                            static_cast<int64_t>(batch));
+            rknn_bucket = 0;
+        }
+        if (rknn_bucket <= 0) {
+            engine::debug::trace_log_scalar("omnivoice.generator.rknn.fallback_tokens", max_total);
+        }
     }
-    impl_->last_stats.batch_capacity = impl_->forward_graph->batch_capacity();
-    impl_->last_stats.total_token_capacity = impl_->forward_graph->total_token_capacity();
-    impl_->last_stats.target_frame_capacity = impl_->forward_graph->target_frame_capacity();
-    const int64_t frame_capacity = impl_->forward_graph->target_frame_capacity();
+    const bool use_rknn = rknn_bucket > 0;
+    // A front-shard ladder runs the backbone on the NPU and keeps the CFG tail (final norm,
+    // audio heads, guidance combine) on this graph in fp32; the full ladder outputs guided
+    // logits directly and needs no tail graph at all.
+    const bool rknn_shard = use_rknn && impl_->rknn->front_shard();
+    if (rknn_shard) {
+        // New request boundary: stateless ladders ignore it, the zero-op generator
+        // (KV caches across steps) re-prefills on its next run().
+        impl_->rknn->reset();
+    }
+    if (use_rknn && !rknn_shard) {
+        impl_->last_stats.batch_capacity = static_cast<int64_t>(batch);
+        impl_->last_stats.total_token_capacity = rknn_bucket;
+        impl_->last_stats.target_frame_capacity = rknn_bucket;
+    } else {
+        std::vector<GraphItemShape> shapes(batch);
+        for (size_t item = 0; item < batch; ++item) {
+            shapes[item] = {inputs[item].total_tokens(), inputs[item].target_frames};
+        }
+        const bool type_changes = impl_->forward_graph != nullptr &&
+            impl_->forward_graph->is_front_shard() != rknn_shard;
+        const bool needs_rebuild = impl_->forward_graph == nullptr || type_changes ||
+            !impl_->forward_graph->matches(*impl_->runtime, shapes);
+        if (needs_rebuild) {
+            const auto rebuild_start = Clock::now();
+            if (impl_->forward_graph == nullptr || type_changes) {
+                // The graph type is baked into its structure (a front-shard tail takes hidden
+                // rows, a full graph takes token ids), so a shard/full switch on a reused session
+                // must construct a fresh graph; rebuild() keeps the type.
+                impl_->forward_graph.reset();
+                if (impl_->mem_saver && !rknn_shard) {
+                    impl_->forward_graph = std::make_unique<Qwen3DiffusionLayerwiseGraph>(
+                        impl_->runtime,
+                        impl_->graph_arena_bytes,
+                        shapes);
+                } else {
+                    impl_->forward_graph = std::make_unique<Qwen3DiffusionForwardGraph>(
+                        impl_->runtime,
+                        impl_->graph_arena_bytes,
+                        shapes,
+                        impl_->perf_mode,
+                        impl_->packed_cfg,
+                        impl_->device_scoring,
+                        rknn_shard);
+                }
+            } else {
+                impl_->forward_graph->rebuild(shapes);
+            }
+            const auto rebuild_end = Clock::now();
+            impl_->last_stats.graph_rebuilt = true;
+            impl_->last_stats.rebuild_ms = engine::debug::elapsed_ms(rebuild_start, rebuild_end);
+            impl_->last_stats.rebuild_clear_ms = impl_->forward_graph->rebuild_clear_ms();
+            impl_->last_stats.rebuild_build_ms = impl_->forward_graph->rebuild_build_ms();
+            impl_->last_stats.rebuild_alloc_ms = impl_->forward_graph->rebuild_alloc_ms();
+            impl_->last_stats.rebuild_init_ms = impl_->forward_graph->rebuild_init_ms();
+        }
+        impl_->last_stats.batch_capacity = impl_->forward_graph->batch_capacity();
+        impl_->last_stats.total_token_capacity = impl_->forward_graph->total_token_capacity();
+        impl_->last_stats.target_frame_capacity = impl_->forward_graph->target_frame_capacity();
+    }
+    const int64_t frame_capacity = use_rknn && !rknn_shard
+        ? rknn_bucket
+        : impl_->forward_graph->target_frame_capacity();
     const size_t item_logits_stride = static_cast<size_t>(frame_capacity * codebooks * vocab_size);
 
     double upload_ms = 0.0;
@@ -2023,9 +2242,16 @@ std::vector<OmniVoiceGeneratedAudioTokens> OmniVoiceQwen3DiffusionRuntime::gener
     double readback_ms = 0.0;
     double scoring_ms = 0.0;
     double update_ms = 0.0;
-    const auto prepare_upload_start = Clock::now();
-    impl_->forward_graph->prepare_request(inputs, guidance_scales);
-    upload_ms += engine::debug::elapsed_ms(prepare_upload_start, Clock::now());
+    std::vector<float> rknn_logits;
+    std::vector<float> rknn_hidden;
+    if (use_rknn && !rknn_shard) {
+        rknn_logits.assign(batch * item_logits_stride, 0.0F);
+    }
+    if (!use_rknn || rknn_shard) {
+        const auto prepare_upload_start = Clock::now();
+        impl_->forward_graph->prepare_request(inputs, guidance_scales);
+        upload_ms += engine::debug::elapsed_ms(prepare_upload_start, Clock::now());
+    }
 
     struct Candidate {
         float score = -std::numeric_limits<float>::infinity();
@@ -2064,12 +2290,50 @@ std::vector<OmniVoiceGeneratedAudioTokens> OmniVoiceQwen3DiffusionRuntime::gener
                 any_sampled = any_sampled || options[item].class_temperature != 0.0F;
             }
         }
-        const bool device_scores = any_greedy && impl_->forward_graph->computes_best_tokens();
-        const auto outputs = impl_->forward_graph->compute(
-            any_sampled || (any_greedy && !device_scores),
-            device_scores,
-            compute_ms,
-            readback_ms);
+        const bool device_scores = (!use_rknn || rknn_shard) && any_greedy &&
+            impl_->forward_graph->computes_best_tokens();
+        GraphStepOutputs outputs;
+        if (use_rknn && !rknn_shard) {
+            // The engine is a batch-2 (CFG pair) graph per request, so a batched step runs
+            // one engine pass per active request; served traffic is batch 1.
+            const auto rknn_start = Clock::now();
+            for (size_t item = 0; item < batch; ++item) {
+                if (fill_counts[item] <= 0) {
+                    continue;
+                }
+                impl_->rknn->run(
+                    rknn_bucket,
+                    rknn_step_inputs(inputs[item], guidance_scales[item]),
+                    rknn_logits.data() + item * item_logits_stride);
+            }
+            compute_ms += engine::debug::elapsed_ms(rknn_start, Clock::now());
+            outputs.logits = &rknn_logits;
+        } else {
+            if (rknn_shard) {
+                // One front-shard engine pass into the tail graph's hidden input. The graph
+                // runs packed (the front-shard construction is gated on packed_cfg), so the
+                // buffer is the packed row layout itself: the conditional row at [0, total),
+                // the unconditional row right behind it at [total, total + target), zero pad
+                // after. Batch is 1 here (enforced at bucket selection).
+                const auto rknn_start = Clock::now();
+                const int64_t hidden_width = impl_->assets->config.llm.hidden_size;
+                const int64_t total = inputs[0].total_tokens();
+                const int64_t target = inputs[0].target_frames;
+                rknn_hidden.assign(static_cast<size_t>(total + target) * hidden_width, 0.0F);
+                impl_->rknn->run(
+                    rknn_bucket,
+                    rknn_step_inputs(inputs[0], guidance_scales[0]),
+                    rknn_hidden.data(),
+                    total);
+                compute_ms += engine::debug::elapsed_ms(rknn_start, Clock::now());
+                impl_->forward_graph->set_hidden(rknn_hidden);
+            }
+            outputs = impl_->forward_graph->compute(
+                any_sampled || (any_greedy && !device_scores),
+                device_scores,
+                compute_ms,
+                readback_ms);
+        }
         const auto scoring_start = Clock::now();
 
         // Greedy-class requests: score every active slot of every request in
@@ -2244,7 +2508,9 @@ std::vector<OmniVoiceGeneratedAudioTokens> OmniVoiceQwen3DiffusionRuntime::gener
                 state.active_indices.end());
         }
         const auto upload_start = Clock::now();
-        impl_->forward_graph->update_generated_target_tokens(inputs);
+        if (!use_rknn) {
+            impl_->forward_graph->update_generated_target_tokens(inputs);
+        }
         const auto upload_end = Clock::now();
         upload_ms += engine::debug::elapsed_ms(upload_start, upload_end);
         update_ms += engine::debug::elapsed_ms(update_start, upload_end);

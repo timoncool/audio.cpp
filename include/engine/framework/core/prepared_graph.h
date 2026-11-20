@@ -5,12 +5,40 @@
 #include <ggml-alloc.h>
 
 #include <memory>
+#include <functional>
 #include <string>
+#include <typeindex>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace engine::core {
 
 class GraphWorkspace;
+
+// Exact, ordered operations replaced by an executor. Outputs are the only
+// region values allowed to escape. Preparation retains non-executing PARAM
+// operand markers interleaved by GGML. Deferred evaluation callbacks are inputs
+// whose handling belongs to the executor rather than the original callback.
+struct GraphRegion {
+    std::vector<ggml_tensor *> nodes;
+    std::vector<ggml_tensor *> outputs;
+    std::vector<ggml_tensor *> deferred_eval;
+};
+
+// An explicitly substituted execution region, owned by its PreparedGraph.
+// prepare() sees the original allocated nodes and their assigned backend.
+// compute() must produce all externally consumed values and preserve the
+// original aliasing/side effects. It may enqueue work on the supplied backend;
+// host consumers must drain dependencies themselves. reset() drains/releases
+// executor-owned work and resources before graph storage is freed or relocated.
+class GraphRegionExecutor {
+public:
+    virtual ~GraphRegionExecutor() = default;
+    virtual void prepare(ggml_backend_t backend, ggml_cgraph * region) = 0;
+    virtual ggml_status compute() = 0;
+    virtual void reset() noexcept = 0;
+};
 
 struct PreparedGraphConfig {
     std::string label;
@@ -65,11 +93,37 @@ public:
     // reserves shared scratch. Structure/addresses stay fixed until reset().
     // Persistent tensors must already be allocated before preparing the graphs.
     void allocate();
+    // Opt-in allocation that can later discard device buffers while retaining
+    // graph metadata. External tensor storage is never owned or released here.
+    void allocate_releasable();
+    // Drains execution and releases plans, captures, scratch and persistent
+    // buffers. Graph IDs and tensor headers survive, but tensor data is invalid.
+    // Reallocate persistent storage, initialize it, then allocate_releasable()
+    // before executing again. Shared workspaces and schedulers are unsupported.
+    void release_buffers();
     // Optional single-graph scheduler execution. The returned handle is borrowed:
     // configure placement/evaluation with GGML's APIs before allocate(). Backend
     // handles (primary first, CPU last) and callback data must outlive this owner. A scheduler
     // owns its split allocations, so it cannot share a GraphWorkspace or entry points.
     ggml_backend_sched_t create_scheduler(std::vector<ggml_backend_t> backends);
+    // Replace exact, contiguous operations before preparation. The full
+    // original graph still determines scratch layout/liveness. Entry points
+    // register their own replacements. Scheduled regions must fit one split.
+    // Without registration, the original preparation/execution path is used.
+    void replace_region(GraphId id, GraphRegion region,
+        std::unique_ptr<GraphRegionExecutor> executor);
+    // Modules record boundaries while building tensors, before entry points
+    // have been assembled. Factories bind to complete execution entry points.
+    void record_region(GraphRegion region,
+        std::function<std::unique_ptr<GraphRegionExecutor>()> factory);
+    // Share compilation/execution state between a module's recorded regions.
+    // Created on demand, retained across buffer release, destroyed on reset.
+    template<class State, class... Args> std::shared_ptr<State> region_state(Args &&... args) {
+        if (!region_states_) region_states_ = std::make_unique<RegionStates>();
+        auto & state = (*region_states_)[std::type_index(typeid(State))];
+        if (!state) state = std::make_shared<State>(std::forward<Args>(args)...);
+        return std::static_pointer_cast<State>(state);
+    }
     void compute(GraphId id = 0);
     // Drain work, release plans/captures and rebuild empty transient metadata.
     // Retains persistent state and owned scratch capacity. For an external
@@ -82,8 +136,17 @@ public:
 private:
     friend class GraphWorkspace;
     struct GraphEntry;
+    struct RecordedRegion {
+        GraphRegion definition;
+        std::function<std::unique_ptr<GraphRegionExecutor>()> factory;
+    };
+    using RegionStates = std::unordered_map<std::type_index, std::shared_ptr<void>>;
+    void bind_regions();
     void validate_graphs() const;
     void prepare_shared_allocation();
+    void build_segments(GraphEntry & entry);
+    void prepare_segments(GraphEntry & entry);
+    void release_segments(GraphEntry & entry);
     void release_graphs();
     void synchronize();
 
@@ -95,6 +158,9 @@ private:
     ModuleBuildContext build_context_;
     ModuleBuildContext persistent_build_context_;
     std::vector<std::unique_ptr<GraphEntry>> graphs_;
+    std::vector<RecordedRegion> recorded_regions_;
+    std::unique_ptr<RegionStates> region_states_;
+    bool regions_bound_ = false;
     std::unique_ptr<GraphWorkspace> owned_workspace_;
     GraphWorkspace * workspace_ = nullptr;
     std::vector<ggml_backend_t> scheduler_backends_;
@@ -103,6 +169,8 @@ private:
     ggml_cgraph * cleanup_graph_ = nullptr;
     bool allocation_started_ = false;
     bool allocated_ = false;
+    bool releasable_ = false;
+    std::vector<ggml_tensor *> scratch_tensors_;
 };
 
 }  // namespace engine::core
