@@ -17,3 +17,13 @@ jobs:
           mkdir released && tar -xzf released.tgz -C released
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends fluidsynth fluid-soundfont-gm
           python3 .github/check_muscriptor.py released
+      - name: Verify the exact piano reference used for GPU comparisons
+        run: echo '8388e54e7255f3e5c940754c09986c6cdfc90f2dc4990748047e9248c62e7cba  fixtures/piano.wav' | sha256sum -c
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muscriptor-reference-piano
+          path: |
+            fixtures/piano.wav
+            fixtures/released-notes.json
+          if-no-files-found: error
+          retention-days: 7
