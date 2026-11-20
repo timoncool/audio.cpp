@@ -15,4 +15,5 @@ jobs:
           curl -fsSL --retry 3 https://github.com/timoncool/audio.cpp/releases/download/server-31cb1a4a/audiocpp-server-linux-cpu-x64.tar.gz -o released.tgz
           echo 'c8a6746c616711b3543a776c04e2de21a9d84cd1a2a522470e467a55f4032401  released.tgz' | sha256sum -c
           mkdir released && tar -xzf released.tgz -C released
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends fluidsynth fluid-soundfont-gm
           python3 .github/check_muscriptor.py released
