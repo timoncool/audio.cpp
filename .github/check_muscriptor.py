@@ -87,6 +87,10 @@ try:
     ends={e["start_event_index"]:e["end_time"] for e in events if e["type"]=="end"}
     found=[(e["pitch"],round(e["start_time"],3),round(ends[e["index"]],3),e["instrument"]) for e in events if e["type"]=="start" and e["index"] in ends]
     print(json.dumps(dict(label=label,health=health,notes_count=len(found),first_notes=found[:16],last_start=max((n[1] for n in found),default=None))),flush=True)
+    baseline=[(60,.26,1.26),(64,1.26,2.25),(67,2.25,3.25),(72,3.25,5.03)]
+    assert len(found)==len(baseline),found[:12]
+    for (pitch,start,end,instrument),(ref_pitch,ref_start,ref_end) in zip(found,baseline):
+        assert pitch==ref_pitch and instrument=="acoustic_piano" and abs(start-ref_start)<.05 and abs(end-ref_end)<.05,found
     for i,pitch in enumerate(notes):
         assert any(p==pitch and abs(start-i-.25)<.25 and end-start>.20 for p,start,end,instrument in found),(pitch,found[:16])
     (root/(label+"-notes.json")).write_text(json.dumps(found))
