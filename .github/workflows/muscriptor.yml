@@ -1,7 +1,7 @@
-name: Existing Studio MuScriptor model on Linux CPU
+name: Studio streamed MIDI on the released server
 on:
   push:
-    branches: [qa/muscriptor-41242418]
+    branches: [qa/muscriptor-stream-release]
 permissions:
   contents: read
 jobs:
@@ -10,28 +10,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          ref: 4124241814c76d1434e3f60b0c1317e02b9adee1
-          path: candidate
       - name: Transcribe with the released CPU package
         run: |
           curl -fsSL --retry 3 https://github.com/timoncool/audio.cpp/releases/download/server-31cb1a4a/audiocpp-server-linux-cpu-x64.tar.gz -o released.tgz
           echo 'c8a6746c616711b3543a776c04e2de21a9d84cd1a2a522470e467a55f4032401  released.tgz' | sha256sum -c
           mkdir released && tar -xzf released.tgz -C released
           python3 .github/check_muscriptor.py released
-      - name: Build the pinned server
-        if: ${{ !cancelled() }}
-        id: build
-        working-directory: candidate
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg libsoxr-dev ninja-build
-          git config core.abbrev 8
-          cmake -S . -B build/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_BUILD_TESTS=OFF
-          cmake --build build/qa --parallel 3 --target audiocpp_server
-      - name: Transcribe with the candidate
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: python3 .github/check_muscriptor.py candidate
-      - name: Compare note events
-        run: diff -u fixtures/released-notes.json fixtures/candidate-notes.json

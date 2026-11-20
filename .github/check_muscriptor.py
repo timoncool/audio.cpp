@@ -1,4 +1,5 @@
 import array
+import base64
 import hashlib
 import json
 import math
@@ -61,8 +62,31 @@ try:
         except URLError: time.sleep(.25)
     else: raise TimeoutError("startup")
     assert health["backend"]=="cpu" and ("31cb1a4a" in str(health) if label=="released" else health["git"]=="41242418"),health
-    result=call("/v1/tasks/run",{"model":"muscriptor-small","request":{"audio":str(audio),"options":{"output_format":"json"}}})
-    events=json.loads(result.get("result",result)["text"])
+    body={"model":"muscriptor-small","stream_format":"sse","include_artifacts":True,"request":{"audio":str(audio)}}
+    req=Request(f"http://127.0.0.1:{port}/v1/tasks/stream",data=json.dumps(body).encode(),
+                headers={"Accept":"text/event-stream","Content-Type":"application/json"})
+    streamed=[]
+    result=None
+    done=False
+    with urlopen(req,timeout=600) as response:
+        for raw in response:
+            line=raw.decode().strip()
+            if not line.startswith("data:"): continue
+            value=line[5:].strip()
+            if value=="[DONE]":
+                done=True
+                break
+            data=json.loads(value)
+            if data["type"]=="error": raise RuntimeError(data)
+            if data["type"]=="task.stream.done": result=data["result"]
+            for art in data.get("event",{}).get("artifacts",[]):
+                if art.get("meta",{}).get("format")=="muscriptor-event-json":
+                    streamed.append(json.loads(base64.b64decode(art["payload"])))
+    assert done and result is not None
+    midi,=[base64.b64decode(a["payload"]) for a in result["artifacts"] if a["kind"]=="midi"]
+    events=json.loads(result["text"])
+    print("Received MIDI bytes, incremental events, final events:",len(midi),len(streamed),len(events),flush=True)
+    assert midi.startswith(b"MThd") and b"MTrk" in midi and streamed
     ends={e["start_event_index"]:e["end_time"] for e in events if e["type"]=="end"}
     found=[(e["pitch"],round(e["start_time"],3),round(ends[e["index"]],3),e["instrument"]) for e in events if e["type"]=="start" and e["index"] in ends]
     print(json.dumps(dict(label=label,health=health,notes=found)),flush=True)
