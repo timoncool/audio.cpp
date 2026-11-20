@@ -1,19 +1,26 @@
-name: Studio streamed MIDI on the released server
+name: Compare MuScriptor reference on two piano recordings
 on:
   push:
-    branches: [qa/muscriptor-stream-release]
+    branches: [qa/muscriptor-python-reference]
 permissions:
   contents: read
 jobs:
   music:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
-      - name: Transcribe with the released CPU package
+      - uses: actions/checkout@v7
+        with:
+          repository: muscriptor/muscriptor
+          ref: 68456b17da8eea651eee6084c104611089810231
+          path: reference
+      - name: Prepare CPU inference and reference piano
         run: |
-          curl -fsSL --retry 3 https://github.com/timoncool/audio.cpp/releases/download/server-31cb1a4a/audiocpp-server-linux-cpu-x64.tar.gz -o released.tgz
-          echo 'c8a6746c616711b3543a776c04e2de21a9d84cd1a2a522470e467a55f4032401  released.tgz' | sha256sum -c
-          mkdir released && tar -xzf released.tgz -C released
-          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends fluidsynth fluid-soundfont-gm
-          python3 .github/check_muscriptor.py released
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fluidsynth fluid-soundfont-gm libsndfile1 ffmpeg
+          python3 -m venv venv
+          venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
+          venv/bin/pip install ./reference
+      - name: Transcribe the same WAVs and original weights with upstream PyTorch
+        run: venv/bin/python .github/check_muscriptor.py reference
