@@ -1,0 +1,39 @@
+name: SoulX-Singer Linux CPU acceptance
+on:
+  push:
+    branches: [qa/soulx-41242418-linux]
+permissions:
+  contents: read
+jobs:
+  singing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: 4124241814c76d1434e3f60b0c1317e02b9adee1
+          path: candidate
+      - name: Build the pinned server
+        working-directory: candidate
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg libsoxr-dev ninja-build
+          git config core.abbrev 8
+          cmake -S . -B build/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_BUILD_TESTS=OFF
+          cmake --build build/qa --parallel 3 --target audiocpp_server
+      - name: Download the pinned reference recordings
+        run: |
+          mkdir fixtures
+          cd fixtures
+          for name in en_prompt.json en_target.json en_prompt.mp3 svc_prompt_demo.mp3 svc_target_demo.mp3; do
+            curl -fsSL --retry 3 -O "https://raw.githubusercontent.com/Soul-AILab/SoulX-Singer/81aeb3ae772c70093c3de74dc23c92d983801ae4/example/audio/$name"
+          done
+          ffmpeg -v error -i en_prompt.mp3 -ac 1 -ar 24000 en_prompt.wav
+          ffmpeg -v error -i svc_prompt_demo.mp3 -ac 1 -ar 24000 svc_prompt.wav
+          ffmpeg -v error -ss 30 -i svc_target_demo.mp3 -t 6 -ac 1 -ar 24000 svc_target.wav
+      - name: Check score-conditioned singing
+        run: python3 .github/soulx_check.py svs
+      - name: Check singing voice conversion
+        if: ${{ !cancelled() && hashFiles('fixtures/svc_target.wav') != '' }}
+        run: python3 .github/soulx_check.py svc
