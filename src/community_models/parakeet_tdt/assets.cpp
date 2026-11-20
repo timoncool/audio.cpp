@@ -71,7 +71,7 @@ std::shared_ptr<const ParakeetTDTAssets> load_transcribe_cpp_assets(const std::f
         throw std::runtime_error("transcribe.cpp Parakeet GGUF is not a TDT model: " + path.string());
     }
     auto assets = std::make_shared<ParakeetTDTAssets>();
-    assets->implementation = &implementation_for_family(family);
+    assets->impl = &implementation_for_family(family);
     auto & config = assets->config;
     config.model_type = "parakeet_tdt";
     config.vocab_size = metadata.require_int("stt.parakeet.predictor.vocab");
