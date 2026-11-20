@@ -1,0 +1,33 @@
+name: Additional music families on the pinned server
+on:
+  push:
+    branches: [qa/music-families-41242418]
+permissions:
+  contents: read
+jobs:
+  music:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: 4124241814c76d1434e3f60b0c1317e02b9adee1
+          path: candidate
+      - name: Build the pinned server
+        id: build
+        working-directory: candidate
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg libsoxr-dev ninja-build
+          git config core.abbrev 8
+          cmake -S . -B build/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_BUILD_TESTS=OFF
+          cmake --build build/qa --parallel 3 --target audiocpp_server
+      - name: Magenta RealTime 2 Small, instrumental from style
+        run: python3 .github/check_music_family.py magenta_realtime_2
+      - name: MiDashengLM-Gen, structured music prompt
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 .github/check_music_family.py midashenglm_gen
+      - name: VeVo2, lyrics and a target singer
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 .github/check_music_family.py vevo2

@@ -1,0 +1,59 @@
+[
+  {
+    "family": "magenta_realtime_2",
+    "package": "magenta_realtime_2_small_q8_0",
+    "default": false,
+    "repository": "audio-cpp/Magenta-RealTime-2-GGUF",
+    "revision": "16ebc99233e394fdb673ca1de94f1c81b560b5a0",
+    "gated": false,
+    "repository_license": "cc-by-4.0",
+    "missing": [],
+    "files": [
+      {
+        "path": "magenta-rt2-small-q8_0.gguf",
+        "bytes": 1326277984,
+        "git_blob": "445aee551ec91b8d049a10d5be94dd9a726e4be9",
+        "sha256": "0b09d7a32bbb0e389fc204dd7be996a5c908699db34fbf0b3eb42f27ae2d3d99"
+      }
+    ],
+    "bytes": 1326277984
+  },
+  {
+    "family": "midashenglm_gen",
+    "package": "midashenglm_gen_q8_0",
+    "default": true,
+    "repository": "audio-cpp/audio.cpp-gguf",
+    "revision": "32c1ce1fea57a513eb9386aa62408d47b1cf7ab2",
+    "gated": false,
+    "repository_license": "other",
+    "missing": [],
+    "files": [
+      {
+        "path": "MiDashengLM-Gen-GGUF/midashenglm-gen-q8_0.gguf",
+        "bytes": 3381370752,
+        "git_blob": "30690a8bf7e0dabcccf0b7245e125012987caa40",
+        "sha256": "1b0ec63a3e1c1711ee7ed26b6ea7ee2b1f013b61d751420c8c88d1d377e34677"
+      }
+    ],
+    "bytes": 3381370752
+  },
+  {
+    "family": "vevo2",
+    "package": "vevo2_q8_0",
+    "default": true,
+    "repository": "audio-cpp/audio.cpp-gguf",
+    "revision": "32c1ce1fea57a513eb9386aa62408d47b1cf7ab2",
+    "gated": false,
+    "repository_license": "other",
+    "missing": [],
+    "files": [
+      {
+        "path": "Vevo2-GGUF/vevo2-q8_0.gguf",
+        "bytes": 3242129792,
+        "git_blob": "df5f23bbc7fdf2dcb00c92aa35497877f4ceac20",
+        "sha256": "881434e73b98e2d3ac94951f26488b5dc5d60f365d9980324a70055dfbffd1ef"
+      }
+    ],
+    "bytes": 3242129792
+  }
+]
